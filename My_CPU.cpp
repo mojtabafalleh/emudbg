@@ -434,12 +434,53 @@ void emulate_test(const ZydisDisassembledInstruction* instr) {
     g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
     LOG(L"[+] TEST => 0x" << std::hex << lhs << L" & 0x" << rhs);
 }
+void emulate_not(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
+    val = ~val;
+    set_register_value<uint64_t>(dst.reg.value, val);
+    LOG(L"[+] NOT => 0x" << std::hex << val);
+}
+void emulate_neg(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
+    val = -val;
+    set_register_value<uint64_t>(dst.reg.value, val);
+    LOG(L"[+] NEG => 0x" << std::hex << val);
+}
 void emulate_jmp(const ZydisDisassembledInstruction* instr) {
     g_regs.rip = (instr->operands[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ?
         instr->operands[0].imm.value.s : get_register_value<uint64_t>(instr->operands[0].reg.value);
     LOG(L"[+] JMP => 0x" << std::hex << g_regs.rip);
 }
-
+void emulate_xchg(const ZydisDisassembledInstruction* instr) {
+    const auto& op1 = instr->operands[0], op2 = instr->operands[1];
+    uint64_t val1 = get_register_value<uint64_t>(op1.reg.value);
+    uint64_t val2 = get_register_value<uint64_t>(op2.reg.value);
+    set_register_value<uint64_t>(op1.reg.value, val2);
+    set_register_value<uint64_t>(op2.reg.value, val1);
+    LOG(L"[+] XCHG => R" << op1.reg.value << L" <=> R" << op2.reg.value);
+}
+void emulate_rol(const ZydisDisassembledInstruction* instr) {
+    auto& dst = instr->operands[0];
+    auto& src = instr->operands[1];
+    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
+    uint8_t shift = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
+    shift &= 0x1F; // حداقل شیفت رو محدود کن
+    val = (val << shift) | (val >> (64 - shift));
+    set_register_value<uint64_t>(dst.reg.value, val);
+    LOG(L"[+] ROL => 0x" << std::hex << val);
+}
+void emulate_ror(const ZydisDisassembledInstruction* instr) {
+    auto& dst = instr->operands[0];
+    auto& src = instr->operands[1];
+    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
+    uint8_t shift = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
+    shift &= 0x1F;
+    val = (val >> shift) | (val << (64 - shift));
+    set_register_value<uint64_t>(dst.reg.value, val);
+    LOG(L"[+] ROR => 0x" << std::hex << val);
+}
 // ------------------- Emulator Loop -------------------
 void start_emulation(uint64_t startAddress) {
     uint64_t address = startAddress;
@@ -526,6 +567,21 @@ void start_emulation(uint64_t startAddress) {
                 emulate_lea(op); break;
             case ZYDIS_MNEMONIC_CPUID:
                 emulate_cpuid(op); break;
+            case ZYDIS_MNEMONIC_NOT:
+                emulate_not(op);
+                break;
+            case ZYDIS_MNEMONIC_NEG:
+                emulate_neg(op);
+                break;
+            case ZYDIS_MNEMONIC_XCHG:
+                emulate_xchg(op);
+                break;
+            case ZYDIS_MNEMONIC_ROL:
+                emulate_rol(op);
+                break;
+            case ZYDIS_MNEMONIC_ROR:
+                emulate_ror(op);
+                break;
             default:
                 std::wcout << L"[!] Instruction not emulated: "
                     << std::wstring(instrText.begin(), instrText.end()) << std::endl;
