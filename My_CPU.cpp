@@ -1,5 +1,4 @@
-﻿// Optimized and cleaner version of My_CPU.cpp
-
+﻿
 #include <windows.h>
 #include <iostream>
 #include <fstream>
