@@ -336,19 +336,44 @@ void emulate_nop(const ZydisDisassembledInstruction*) {
 
 void emulate_mov(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
+
     if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        uint64_t value = (src.type == ZYDIS_OPERAND_TYPE_REGISTER) ? get_register_value<uint64_t>(src.reg.value) : src.imm.value.u;
+        uint64_t value = (src.type == ZYDIS_OPERAND_TYPE_REGISTER)
+            ? get_register_value<uint64_t>(src.reg.value)
+            : src.imm.value.u;
+
         set_register_value<uint64_t>(dst.reg.value, value);
         LOG(L"[+] MOV => 0x" << std::hex << value);
     }
     else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        uint64_t addr = get_register_value<uint64_t>(dst.mem.base) + dst.mem.disp.value;
-        uint64_t value = (src.type == ZYDIS_OPERAND_TYPE_REGISTER) ? get_register_value<uint64_t>(src.reg.value) : src.imm.value.u;
+        uint64_t base = (src.type == ZYDIS_OPERAND_TYPE_MEMORY && src.mem.base != ZYDIS_REGISTER_NONE)
+            ? get_register_value<uint64_t>(src.mem.base)
+            : 0;
+        uint64_t index = (src.type == ZYDIS_OPERAND_TYPE_MEMORY && src.mem.index != ZYDIS_REGISTER_NONE)
+            ? get_register_value<uint64_t>(src.mem.index)
+            : 0;
+        uint64_t scale = (src.type == ZYDIS_OPERAND_TYPE_MEMORY) ? src.mem.scale : 1;
+        uint64_t disp = (src.type == ZYDIS_OPERAND_TYPE_MEMORY) ? src.mem.disp.value : 0;
+
+        uint64_t addr = base + index * scale + disp;
+        uint64_t value = (dst.type == ZYDIS_OPERAND_TYPE_REGISTER)
+            ? get_register_value<uint64_t>(dst.reg.value)
+            : dst.imm.value.u;
+
         WriteMemory(addr, &value, sizeof(value));
-        LOG(L"[+] MOV [mem] = 0x" << std::hex << value);
+        LOG(L"[+] MOV [mem] = 0x" << std::hex << value <<"[address] : 0x" << std::hex << addr);
     }
     else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        uint64_t addr = get_register_value<uint64_t>(src.mem.base) + src.mem.disp.value;
+        uint64_t base = (src.mem.base != ZYDIS_REGISTER_NONE)
+            ? get_register_value<uint64_t>(src.mem.base)
+            : 0;
+        uint64_t index = (src.mem.index != ZYDIS_REGISTER_NONE)
+            ? get_register_value<uint64_t>(src.mem.index)
+            : 0;
+        uint64_t scale = src.mem.scale;
+        uint64_t disp = src.mem.disp.value;
+
+        uint64_t addr = base + index * scale + disp;
         uint64_t value = 0;
         ReadMemory(addr, &value, sizeof(value));
         set_register_value<uint64_t>(dst.reg.value, value);
@@ -368,9 +393,40 @@ void emulate_sub(const ZydisDisassembledInstruction* instr) {
 
 void emulate_call(const ZydisDisassembledInstruction* instr) {
     uint64_t return_address = g_regs.rip + instr->info.length;
+
+    // Push return address to stack
     g_regs.rsp.q -= 8;
     WriteMemory(g_regs.rsp.q, &return_address, 8);
-    g_regs.rip = (instr->operands[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? instr->operands[0].imm.value.s : get_register_value<uint64_t>(instr->operands[0].reg.value);
+
+    // Determine call target
+    const auto& op = instr->operands[0];
+    uint64_t target_rip = 0;
+
+    if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        target_rip = op.imm.value.s;
+    }
+    else if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        target_rip = get_register_value<uint64_t>(op.reg.value);
+    }
+    else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        uint64_t base = (op.mem.base != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(op.mem.base) : 0;
+        uint64_t index = (op.mem.index != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(op.mem.index) : 0;
+        uint64_t disp = op.mem.disp.value;
+
+        uint64_t address = base + index * op.mem.scale + disp;
+
+        // Read QWORD from memory at calculated address
+        if (!ReadMemory(address, &target_rip, sizeof(target_rip))) {
+            std::wcout << L"[!] Failed to read memory at 0x" << std::hex << address << std::endl;
+            return;
+        }
+    }
+    else {
+        std::wcout << L"[!] Unsupported operand type for CALL" << std::endl;
+        return;
+    }
+
+    g_regs.rip = target_rip;
     LOG(L"[+] CALL => 0x" << std::hex << g_regs.rip);
 }
 
@@ -454,8 +510,33 @@ void emulate_neg(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_jmp(const ZydisDisassembledInstruction* instr) {
-    g_regs.rip = (instr->operands[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ?
-        instr->operands[0].imm.value.s : get_register_value<uint64_t>(instr->operands[0].reg.value);
+    const auto& op = instr->operands[0];
+
+    if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        g_regs.rip = op.imm.value.s;
+    }
+    else if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        g_regs.rip = get_register_value<uint64_t>(op.reg.value);
+    }
+    else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+
+        uint64_t base = (op.mem.base != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(op.mem.base) : 0;
+        uint64_t index = (op.mem.index != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(op.mem.index) : 0;
+        uint64_t disp = op.mem.disp.value;
+
+        uint64_t address = base + index * op.mem.scale + disp +instr->info.length;
+        uint64_t targetRip = 0;
+        if (!ReadMemory(address, &targetRip, sizeof(targetRip))) {
+            std::wcout << L"[!] Failed to read memory at 0x" << std::hex << address << std::endl;
+            return;
+        }
+        g_regs.rip = targetRip;
+    }
+    else {
+        std::wcout << L"[!] Unsupported operand type for JMP" << std::endl;
+        return;
+    }
+
     LOG(L"[+] JMP => 0x" << std::hex << g_regs.rip);
 }
 
