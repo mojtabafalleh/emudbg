@@ -228,6 +228,60 @@ void emulate_pop(const ZydisDisassembledInstruction* instr) {
     set_register_value<uint64_t>(op.reg.value, value);
     LOG(L"[+] POP => 0x" << std::hex << value);
 }
+void emulate_add(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0], src = instr->operands[1];
+    uint64_t lhs = get_register_value<uint64_t>(dst.reg.value);
+    uint64_t rhs = (src.type == ZYDIS_OPERAND_TYPE_REGISTER) ? get_register_value<uint64_t>(src.reg.value) : src.imm.value.u;
+    uint64_t result = lhs + rhs;
+    set_register_value<uint64_t>(dst.reg.value, result);
+    // (میتوان فلگ‌ها را هم بروز کرد)
+    LOG(L"[+] ADD => 0x" << std::hex << result);
+}
+
+void emulate_inc(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
+    val++;
+    set_register_value<uint64_t>(dst.reg.value, val);
+    LOG(L"[+] INC => 0x" << std::hex << val);
+}
+
+void emulate_dec(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
+    val--;
+    set_register_value<uint64_t>(dst.reg.value, val);
+    LOG(L"[+] DEC => 0x" << std::hex << val);
+}
+
+void emulate_cmp(const ZydisDisassembledInstruction* instr) {
+    const auto& op1 = instr->operands[0], op2 = instr->operands[1];
+    uint64_t lhs = get_register_value<uint64_t>(op1.reg.value);
+    uint64_t rhs = (op2.type == ZYDIS_OPERAND_TYPE_REGISTER) ? get_register_value<uint64_t>(op2.reg.value) : op2.imm.value.u;
+    uint64_t result = lhs - rhs;
+    update_flags_sub(result, lhs, rhs, instr->info.operand_width);
+    LOG(L"[+] CMP => 0x" << std::hex << lhs << L" ? 0x" << rhs);
+}
+
+void emulate_jz(const ZydisDisassembledInstruction* instr) {
+    if (g_regs.rflags.flags.ZF)
+        g_regs.rip = instr->operands[0].imm.value.s;
+    else
+        g_regs.rip += instr->info.length;
+    LOG(L"[+] JZ to => 0x" << std::hex << g_regs.rip);
+}
+
+void emulate_jnz(const ZydisDisassembledInstruction* instr) {
+    if (!g_regs.rflags.flags.ZF)
+        g_regs.rip = instr->operands[0].imm.value.s;
+    else
+        g_regs.rip += instr->info.length;
+    LOG(L"[+] JNZ to => 0x" << std::hex << g_regs.rip);
+}
+
+void emulate_nop(const ZydisDisassembledInstruction*) {
+    LOG(L"[+] NOP");
+}
 
 void emulate_mov(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
@@ -269,7 +323,7 @@ void start_emulation(uint64_t startAddress) {
     uint64_t address = startAddress;
     BYTE buffer[16] = { 0 };
     SIZE_T bytesRead = 0;
-
+    bool ripModified = false;
     Zydis disasm(true);
 
     while (true) {
@@ -305,14 +359,42 @@ void start_emulation(uint64_t startAddress) {
             case ZYDIS_MNEMONIC_POP:
                 emulate_pop(op);
                 break;
+            case ZYDIS_MNEMONIC_ADD:
+                emulate_add(op);
+                break;
+            case ZYDIS_MNEMONIC_INC:
+                emulate_inc(op);
+                break;
+            case ZYDIS_MNEMONIC_DEC:
+                emulate_dec(op);
+                break;
+            case ZYDIS_MNEMONIC_CMP:
+                emulate_cmp(op);
+                break;
+            case ZYDIS_MNEMONIC_JZ:
+                emulate_jz(op);
+                break;
+            case ZYDIS_MNEMONIC_JNZ:
+                emulate_jnz(op);
+                break;
+            case ZYDIS_MNEMONIC_NOP:
+                emulate_nop(op);
+                break;
+
             default:
                 std::wcout << L"[!] Instruction not emulated: "
                     << std::wstring(instrText.begin(), instrText.end()) << std::endl;
                 break;
             }
-
-            if (instr.mnemonic != ZYDIS_MNEMONIC_CALL && instr.mnemonic != ZYDIS_MNEMONIC_RET)
+            if (
+                instr.mnemonic != ZYDIS_MNEMONIC_CALL &&
+                instr.mnemonic != ZYDIS_MNEMONIC_RET &&
+                instr.mnemonic != ZYDIS_MNEMONIC_JZ &&
+                instr.mnemonic != ZYDIS_MNEMONIC_JNZ
+                )
                 g_regs.rip += instr.length;
+
+
 
             address = g_regs.rip;
 
