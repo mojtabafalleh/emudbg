@@ -219,6 +219,56 @@ void emulate_push(const ZydisDisassembledInstruction* instr) {
     WriteMemory(g_regs.rsp.q, &value, 8);
     LOG(L"[+] PUSH 0x" << std::hex << value);
 }
+void emulate_mul(const ZydisDisassembledInstruction* instr) {
+    const auto& src = instr->operands[0];
+    uint64_t val = get_register_value<uint64_t>(src.reg.value);
+    g_regs.rax.q *= val;
+    LOG(L"[+] MUL => RAX = 0x" << std::hex << g_regs.rax.q);
+}
+
+void emulate_imul(const ZydisDisassembledInstruction* instr) {
+    const auto& src = instr->operands[0];
+    int64_t val1 = static_cast<int64_t>(g_regs.rax.q);
+    int64_t val2 = static_cast<int64_t>(get_register_value<uint64_t>(src.reg.value));
+    int64_t result = val1 * val2;
+    g_regs.rax.q = static_cast<uint64_t>(result);
+    LOG(L"[+] IMUL => RAX = 0x" << std::hex << g_regs.rax.q);
+}
+void emulate_xor(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0], src = instr->operands[1];
+    uint64_t lhs = get_register_value<uint64_t>(dst.reg.value);
+    uint64_t rhs = get_register_value<uint64_t>(src.reg.value);
+    uint64_t result = lhs ^ rhs;
+    set_register_value<uint64_t>(dst.reg.value, result);
+    LOG(L"[+] XOR => 0x" << std::hex << result);
+}
+
+void emulate_and(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0], src = instr->operands[1];
+    uint64_t lhs = get_register_value<uint64_t>(dst.reg.value);
+    uint64_t rhs = get_register_value<uint64_t>(src.reg.value);
+    uint64_t result = lhs & rhs;
+    set_register_value<uint64_t>(dst.reg.value, result);
+    LOG(L"[+] AND => 0x" << std::hex << result);
+}
+
+void emulate_or(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0], src = instr->operands[1];
+    uint64_t lhs = get_register_value<uint64_t>(dst.reg.value);
+    uint64_t rhs = get_register_value<uint64_t>(src.reg.value);
+    uint64_t result = lhs | rhs;
+    set_register_value<uint64_t>(dst.reg.value, result);
+    LOG(L"[+] OR => 0x" << std::hex << result);
+}
+void emulate_lea(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& mem = instr->operands[1].mem;
+    uint64_t base = (mem.base != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(mem.base) : 0;
+    uint64_t index = (mem.index != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(mem.index) : 0;
+    uint64_t value = base + index * mem.scale + mem.disp.value;
+    set_register_value<uint64_t>(dst.reg.value, value);
+    LOG(L"[+] LEA => 0x" << std::hex << value);
+}
 
 void emulate_pop(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
@@ -234,7 +284,6 @@ void emulate_add(const ZydisDisassembledInstruction* instr) {
     uint64_t rhs = (src.type == ZYDIS_OPERAND_TYPE_REGISTER) ? get_register_value<uint64_t>(src.reg.value) : src.imm.value.u;
     uint64_t result = lhs + rhs;
     set_register_value<uint64_t>(dst.reg.value, result);
-    // (میتوان فلگ‌ها را هم بروز کرد)
     LOG(L"[+] ADD => 0x" << std::hex << result);
 }
 
@@ -290,6 +339,20 @@ void emulate_mov(const ZydisDisassembledInstruction* instr) {
         set_register_value<uint64_t>(dst.reg.value, value);
         LOG(L"[+] MOV => 0x" << std::hex << value);
     }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        uint64_t addr = get_register_value<uint64_t>(dst.mem.base) + dst.mem.disp.value;
+        uint64_t value = (src.type == ZYDIS_OPERAND_TYPE_REGISTER) ? get_register_value<uint64_t>(src.reg.value) : src.imm.value.u;
+        WriteMemory(addr, &value, sizeof(value));
+        LOG(L"[+] MOV [mem] = 0x" << std::hex << value);
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        uint64_t addr = get_register_value<uint64_t>(src.mem.base) + src.mem.disp.value;
+        uint64_t value = 0;
+        ReadMemory(addr, &value, sizeof(value));
+        set_register_value<uint64_t>(dst.reg.value, value);
+        LOG(L"[+] MOV reg <= [mem] = 0x" << std::hex << value);
+    }
+
 }
 
 void emulate_sub(const ZydisDisassembledInstruction* instr) {
@@ -316,6 +379,65 @@ void emulate_ret(const ZydisDisassembledInstruction*) {
     g_regs.rsp.q += 8;
     g_regs.rip = ret_addr;
     LOG(L"[+] RET to => 0x" << std::hex << ret_addr);
+}
+void emulate_shl(const ZydisDisassembledInstruction* instr) {
+    auto& dst = instr->operands[0];
+    auto& src = instr->operands[1];
+    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
+    uint8_t shift = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
+    val <<= shift;
+    set_register_value<uint64_t>(dst.reg.value, val);
+    LOG(L"[+] SHL => 0x" << std::hex << val);
+}
+
+void emulate_shr(const ZydisDisassembledInstruction* instr) {
+    auto& dst = instr->operands[0];
+    auto& src = instr->operands[1];
+    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
+    uint8_t shift = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
+    val >>= shift;
+    set_register_value<uint64_t>(dst.reg.value, val);
+    LOG(L"[+] SHR => 0x" << std::hex << val);
+}
+
+void emulate_sar(const ZydisDisassembledInstruction* instr) {
+    auto& dst = instr->operands[0];
+    auto& src = instr->operands[1];
+    int64_t val = get_register_value<int64_t>(dst.reg.value);
+    uint8_t shift = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
+    val >>= shift;
+    set_register_value<int64_t>(dst.reg.value, val);
+    LOG(L"[+] SAR => 0x" << std::hex << val);
+}
+void emulate_cpuid(const ZydisDisassembledInstruction*) {
+    int cpu_info[4];
+    __cpuidex(cpu_info, static_cast<int>(g_regs.rax.q), static_cast<int>(g_regs.rcx.q));
+
+    g_regs.rax.q = static_cast<uint32_t>(cpu_info[0]);
+    g_regs.rbx.q = static_cast<uint32_t>(cpu_info[1]);
+    g_regs.rcx.q = static_cast<uint32_t>(cpu_info[2]);
+    g_regs.rdx.q = static_cast<uint32_t>(cpu_info[3]);
+
+    LOG(L"[+] CPUID Host => EAX: 0x" << std::hex << cpu_info[0] <<
+        L", EBX: 0x" << cpu_info[1] <<
+        L", ECX: 0x" << cpu_info[2] <<
+        L", EDX: 0x" << cpu_info[3]);
+}
+void emulate_test(const ZydisDisassembledInstruction* instr) {
+    auto& op1 = instr->operands[0];
+    auto& op2 = instr->operands[1];
+    uint64_t lhs = get_register_value<uint64_t>(op1.reg.value);
+    uint64_t rhs = get_register_value<uint64_t>(op2.reg.value);
+    uint64_t result = lhs & rhs;
+    g_regs.rflags.flags.ZF = (result == 0);
+    g_regs.rflags.flags.SF = (result >> (instr->info.operand_width - 1)) & 1;
+    g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
+    LOG(L"[+] TEST => 0x" << std::hex << lhs << L" & 0x" << rhs);
+}
+void emulate_jmp(const ZydisDisassembledInstruction* instr) {
+    g_regs.rip = (instr->operands[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ?
+        instr->operands[0].imm.value.s : get_register_value<uint64_t>(instr->operands[0].reg.value);
+    LOG(L"[+] JMP => 0x" << std::hex << g_regs.rip);
 }
 
 // ------------------- Emulator Loop -------------------
@@ -380,7 +502,30 @@ void start_emulation(uint64_t startAddress) {
             case ZYDIS_MNEMONIC_NOP:
                 emulate_nop(op);
                 break;
-
+            case ZYDIS_MNEMONIC_XOR:
+                emulate_xor(op); break;
+            case ZYDIS_MNEMONIC_OR:
+                emulate_or(op); break;
+            case ZYDIS_MNEMONIC_AND:
+                emulate_and(op); break;
+            case ZYDIS_MNEMONIC_MUL:
+                emulate_mul(op); break;
+            case ZYDIS_MNEMONIC_IMUL:
+                emulate_imul(op); break;
+            case ZYDIS_MNEMONIC_SHL:
+                emulate_shl(op); break;
+            case ZYDIS_MNEMONIC_SHR:
+                emulate_shr(op); break;
+            case ZYDIS_MNEMONIC_SAR:
+                emulate_sar(op); break;
+            case ZYDIS_MNEMONIC_TEST:
+                emulate_test(op); break;
+            case ZYDIS_MNEMONIC_JMP:
+                emulate_jmp(op); break;
+            case ZYDIS_MNEMONIC_LEA:
+                emulate_lea(op); break;
+            case ZYDIS_MNEMONIC_CPUID:
+                emulate_cpuid(op); break;
             default:
                 std::wcout << L"[!] Instruction not emulated: "
                     << std::wstring(instrText.begin(), instrText.end()) << std::endl;
