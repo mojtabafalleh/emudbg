@@ -60,13 +60,52 @@ struct RegState {
 
 // ------------------- Memory I/O Helpers -------------------
 bool ReadMemory(uint64_t address, void* buffer, SIZE_T size) {
-    SIZE_T bytesRead = 0;
+    SIZE_T bytesRead;
     return ReadProcessMemory(hProcess, (LPCVOID)address, buffer, size, &bytesRead) && bytesRead == size;
 }
 
 bool WriteMemory(uint64_t address, const void* buffer, SIZE_T size) {
-    SIZE_T bytesWritten = 0;
+    SIZE_T bytesWritten;
     return WriteProcessMemory(hProcess, (LPVOID)address, buffer, size, &bytesWritten) && bytesWritten == size;
+}
+
+template<typename T>
+bool AccessMemory(bool write, uint64_t base, uint64_t index, uint8_t scale, int64_t disp, T* inout) {
+    uint64_t address = base + (index * scale) + disp;
+    return write ? WriteMemory(address, inout, sizeof(T)) : ReadMemory(address, inout, sizeof(T));
+}
+
+template<typename T>
+bool AccessEffectiveMemory(const ZydisDecodedOperand& op, T* inout, bool write) {
+    if (op.type != ZYDIS_OPERAND_TYPE_MEMORY) return false;
+
+    uint64_t base = (op.mem.base != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(op.mem.base) : 0;
+    uint64_t index = (op.mem.index != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(op.mem.index) : 0;
+    uint8_t scale = static_cast<uint8_t>(op.mem.scale);
+    int64_t disp = op.mem.disp.value;
+
+    uint64_t address = base + (index * scale) + disp;
+    bool success = write 
+        ? WriteMemory(address, inout, sizeof(T)) 
+        : ReadMemory(address, inout, sizeof(T));
+
+    if (!success) {
+        std::cerr << std::hex << std::setfill('0');
+        std::cerr << "[!] Memory " << (write ? "write" : "read") << " failed at address 0x" 
+                  << address << " (RIP: 0x" << std::hex << g_regs.rip << ")\n";
+    }
+
+    return success;
+}
+
+template<typename T>
+bool ReadEffectiveMemory(const ZydisDecodedOperand& op, T* out) {
+    return AccessEffectiveMemory(op, out, false);
+}
+
+template<typename T>
+bool WriteEffectiveMemory(const ZydisDecodedOperand& op, T value) {
+    return AccessEffectiveMemory(op, &value, true);
 }
 
 // ------------------- Register Access -------------------
@@ -274,6 +313,135 @@ void emulate_lea(const ZydisDisassembledInstruction* instr) {
     set_register_value<uint64_t>(dst.reg.value, value);
     LOG(L"[+] LEA => 0x" << std::hex << value);
 }
+void emulate_cmpxchg(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    const uint8_t width = instr->info.operand_width;
+
+    bool equal = false;
+
+    switch (width) {
+    case 8: {
+        uint8_t acc = get_register_value<uint8_t>(ZYDIS_REGISTER_AL);
+        uint8_t dst_val = 0;
+
+        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            dst_val = get_register_value<uint8_t>(dst.reg.value);
+        }
+        else {
+            ReadEffectiveMemory(dst, &dst_val);
+        }
+
+        if (dst_val == acc) {
+            uint8_t src_val = get_register_value<uint8_t>(src.reg.value);
+            if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+                set_register_value<uint8_t>(dst.reg.value, src_val);
+            }
+            else {
+                WriteEffectiveMemory(dst, src_val);
+            }
+            equal = true;
+        }
+        else {
+            set_register_value<uint8_t>(ZYDIS_REGISTER_AL, dst_val);
+        }
+
+        update_flags_sub(dst_val - acc, dst_val, acc, 8);
+    } break;
+
+    case 16: {
+        uint16_t acc = get_register_value<uint16_t>(ZYDIS_REGISTER_AX);
+        uint16_t dst_val = 0;
+
+        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            dst_val = get_register_value<uint16_t>(dst.reg.value);
+        }
+        else {
+            ReadEffectiveMemory(dst, &dst_val);
+        }
+
+        if (dst_val == acc) {
+            uint16_t src_val = get_register_value<uint16_t>(src.reg.value);
+            if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+                set_register_value<uint16_t>(dst.reg.value, src_val);
+            }
+            else {
+                WriteEffectiveMemory(dst, src_val);
+            }
+            equal = true;
+        }
+        else {
+            set_register_value<uint16_t>(ZYDIS_REGISTER_AX, dst_val);
+        }
+
+        update_flags_sub(dst_val - acc, dst_val, acc, 16);
+    } break;
+
+    case 32: {
+        uint32_t acc = get_register_value<uint32_t>(ZYDIS_REGISTER_EAX);
+        uint32_t dst_val = 0;
+
+        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            dst_val = get_register_value<uint32_t>(dst.reg.value);
+        }
+        else {
+            ReadEffectiveMemory(dst, &dst_val);
+        }
+
+        if (dst_val == acc) {
+            uint32_t src_val = get_register_value<uint32_t>(src.reg.value);
+            if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+                set_register_value<uint32_t>(dst.reg.value, src_val);
+            }
+            else {
+                WriteEffectiveMemory(dst, src_val);
+            }
+            equal = true;
+        }
+        else {
+            set_register_value<uint32_t>(ZYDIS_REGISTER_EAX, dst_val);
+        }
+
+        update_flags_sub(dst_val - acc, dst_val, acc, 32);
+    } break;
+
+    case 64: {
+        uint64_t acc = get_register_value<uint64_t>(ZYDIS_REGISTER_RAX);
+        uint64_t dst_val = 0;
+
+        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            dst_val = get_register_value<uint64_t>(dst.reg.value);
+        }
+        else {
+            ReadEffectiveMemory(dst, &dst_val);
+        }
+
+        if (dst_val == acc) {
+            uint64_t src_val = get_register_value<uint64_t>(src.reg.value);
+            if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+                set_register_value<uint64_t>(dst.reg.value, src_val);
+            }
+            else {
+                WriteEffectiveMemory(dst, src_val);
+            }
+            equal = true;
+        }
+        else {
+            set_register_value<uint64_t>(ZYDIS_REGISTER_RAX, dst_val);
+        }
+
+        update_flags_sub(dst_val - acc, dst_val, acc, 64);
+    } break;
+
+    default:
+        LOG(L"[!] Unsupported operand width: " << std::dec << static_cast<int>(width));
+        return;
+    }
+
+    g_regs.rflags.flags.ZF =  equal;
+    LOG(L"[+] CMPXCHG => ZF=" << (equal ? "1" : "0"));
+}
+
 
 void emulate_pop(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
@@ -293,6 +461,87 @@ void emulate_add(const ZydisDisassembledInstruction* instr) {
     update_flags_add(result, lhs, rhs, instr->info.operand_width);
     LOG(L"[+] ADD => 0x" << std::hex << result);
 }
+void emulate_bt(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+
+    uint64_t bit_base = 0;
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        bit_base = get_register_value<uint64_t>(dst.reg.value);
+    }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        ReadEffectiveMemory(dst, &bit_base);
+    }
+
+    uint64_t shift = 0;
+    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        shift = get_register_value<uint64_t>(src.reg.value);
+    }
+    else {
+        shift = src.imm.value.u;
+    }
+
+    g_regs.rflags.flags.CF = (bit_base >> shift) & 1;
+
+    LOG(L"[+] BT => CF = " << g_regs.rflags.flags.CF);
+}
+
+void emulate_btr(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+
+    uint64_t bit_base = 0;
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        bit_base = get_register_value<uint64_t>(dst.reg.value);
+    }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        ReadEffectiveMemory(dst, &bit_base);
+    }
+
+    uint64_t shift = 0;
+    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        shift = get_register_value<uint64_t>(src.reg.value);
+    }
+    else {
+        shift = src.imm.value.u;
+    }
+
+    g_regs.rflags.flags.CF = (bit_base >> shift) & 1;
+    bit_base &= ~(1ULL << shift);
+
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        set_register_value<uint64_t>(dst.reg.value, bit_base);
+    }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        WriteEffectiveMemory(dst, bit_base);
+    }
+
+    LOG(L"[+] BTR => CF = " << g_regs.rflags.flags.CF << L", Result: 0x" << std::hex << bit_base);
+}
+
+void emulate_jnb(const ZydisDisassembledInstruction* instr) {
+    if (!g_regs.rflags.flags.CF) {
+        g_regs.rip = instr->operands[0].imm.value.s;
+    }
+    else {
+        g_regs.rip += instr->info.length;
+    }
+    LOG(L"[+] JNB to => 0x" << std::hex << g_regs.rip);
+}
+
+void emulate_xgetbv(const ZydisDisassembledInstruction*) {
+    uint32_t ecx = static_cast<uint32_t>(g_regs.rcx.q);
+
+    uint32_t eax = 0, edx = 0;
+    xgetbv_asm(ecx, &eax, &edx);
+
+    g_regs.rax.q = eax;
+    g_regs.rdx.q = edx;
+
+    LOG(L"[+] XGETBV => ECX=0x" << std::hex << ecx
+        << L", RAX=0x" << eax << L", RDX=0x" << edx);
+}
+
 
 void emulate_inc(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -312,13 +561,27 @@ void emulate_dec(const ZydisDisassembledInstruction* instr) {
 
 void emulate_cmp(const ZydisDisassembledInstruction* instr) {
     const auto& op1 = instr->operands[0], op2 = instr->operands[1];
-    uint64_t lhs = get_register_value<uint64_t>(op1.reg.value);
-    uint64_t rhs = (op2.type == ZYDIS_OPERAND_TYPE_REGISTER) ? get_register_value<uint64_t>(op2.reg.value) : op2.imm.value.u;
+    uint64_t lhs = 0, rhs = 0;
+
+    if (op1.type == ZYDIS_OPERAND_TYPE_REGISTER)
+        lhs = get_register_value<uint64_t>(op1.reg.value);
+    else if (op1.type == ZYDIS_OPERAND_TYPE_MEMORY)
+        ReadEffectiveMemory(op1, &lhs);
+    else if (op1.type == ZYDIS_OPERAND_TYPE_IMMEDIATE)
+        lhs = op1.imm.value.u;
+
+    if (op2.type == ZYDIS_OPERAND_TYPE_REGISTER)
+        rhs = get_register_value<uint64_t>(op2.reg.value);
+    else if (op2.type == ZYDIS_OPERAND_TYPE_MEMORY)
+        ReadEffectiveMemory(op2, &rhs);
+    else if (op2.type == ZYDIS_OPERAND_TYPE_IMMEDIATE)
+        rhs = op2.imm.value.u;
+
     uint64_t result = lhs - rhs;
     update_flags_sub(result, lhs, rhs, instr->info.operand_width);
+
     LOG(L"[+] CMP => 0x" << std::hex << lhs << L" ? 0x" << rhs);
 }
-
 void emulate_jz(const ZydisDisassembledInstruction* instr) {
     if (g_regs.rflags.flags.ZF)
         g_regs.rip = instr->operands[0].imm.value.s;
@@ -342,47 +605,90 @@ void emulate_nop(const ZydisDisassembledInstruction*) {
 void emulate_mov(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
 
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        uint64_t value = (src.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            ? get_register_value<uint64_t>(src.reg.value)
-            : src.imm.value.u;
-
-        set_register_value<uint64_t>(dst.reg.value, value);
-        LOG(L"[+] MOV => 0x" << std::hex << value);
+    // MOV reg <= imm
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(src.imm.value.u));
+        LOG(L"[+] MOV reg <= imm");
     }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        uint64_t base = (src.type == ZYDIS_OPERAND_TYPE_MEMORY && src.mem.base != ZYDIS_REGISTER_NONE)
-            ? get_register_value<uint64_t>(src.mem.base)
-            : 0;
-        uint64_t index = (src.type == ZYDIS_OPERAND_TYPE_MEMORY && src.mem.index != ZYDIS_REGISTER_NONE)
-            ? get_register_value<uint64_t>(src.mem.index)
-            : 0;
-        uint64_t scale = (src.type == ZYDIS_OPERAND_TYPE_MEMORY) ? src.mem.scale : 1;
-        uint64_t disp = (src.type == ZYDIS_OPERAND_TYPE_MEMORY) ? src.mem.disp.value : 0;
-
-        uint64_t addr = base + index * scale + disp;
-        uint64_t value = (dst.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            ? get_register_value<uint64_t>(dst.reg.value)
-            : dst.imm.value.u;
-
-        WriteMemory(addr, &value, sizeof(value));
-        LOG(L"[+] MOV [mem] = 0x" << std::hex << value <<"[address] : 0x" << std::hex << addr);
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        uint64_t base = (src.mem.base != ZYDIS_REGISTER_NONE)
-            ? get_register_value<uint64_t>(src.mem.base)
-            : 0;
-        uint64_t index = (src.mem.index != ZYDIS_REGISTER_NONE)
-            ? get_register_value<uint64_t>(src.mem.index)
-            : 0;
-        uint64_t scale = src.mem.scale;
-        uint64_t disp = src.mem.disp.value;
-
-        uint64_t addr = base + index * scale + disp;
-        uint64_t value = 0;
-        ReadMemory(addr, &value, sizeof(value));
+    // MOV reg <= reg
+    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        uint64_t value = get_register_value<uint64_t>(src.reg.value);
         set_register_value<uint64_t>(dst.reg.value, value);
-        LOG(L"[+] MOV reg <= [mem] = 0x" << std::hex << value);
+        LOG(L"[+] MOV reg <= reg");
+    }
+    // MOV reg <= [mem]
+    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        if (instr->info.operand_width == 64) {
+            uint64_t value;
+            if (ReadEffectiveMemory(src, &value)) {
+                set_register_value<uint64_t>(dst.reg.value, value);
+                LOG(L"[+] MOV reg <= qword [mem]");
+            }
+        }
+        else if (instr->info.operand_width == 32) {
+            uint32_t value;
+            if (ReadEffectiveMemory(src, &value)) {
+                set_register_value<uint32_t>(dst.reg.value, value);
+                LOG(L"[+] MOV reg <= dword [mem]");
+            }
+        }
+        else if (instr->info.operand_width == 16) {
+            uint16_t value;
+            if (ReadEffectiveMemory(src, &value)) {
+                set_register_value<uint16_t>(dst.reg.value, value);
+                LOG(L"[+] MOV reg <= word [mem]");
+            }
+        }
+        else if (instr->info.operand_width == 8) {
+            uint8_t value;
+            if (ReadEffectiveMemory(src, &value)) {
+                set_register_value<uint8_t>(dst.reg.value, value);
+                LOG(L"[+] MOV reg <= byte [mem]");
+            }
+        }
+    }
+    // MOV [mem] <= reg
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        uint64_t value = get_register_value<uint64_t>(src.reg.value);
+        if (instr->info.operand_width == 64) {
+            WriteEffectiveMemory(dst, value);
+            LOG(L"[+] MOV qword [mem] <= reg");
+        }
+        else if (instr->info.operand_width == 32) {
+            WriteEffectiveMemory(dst, static_cast<uint32_t>(value));
+            LOG(L"[+] MOV dword [mem] <= reg");
+        }
+        else if (instr->info.operand_width == 16) {
+            WriteEffectiveMemory(dst, static_cast<uint16_t>(value));
+            LOG(L"[+] MOV word [mem] <= reg");
+        }
+        else if (instr->info.operand_width == 8) {
+            WriteEffectiveMemory(dst, static_cast<uint8_t>(value));
+            LOG(L"[+] MOV byte [mem] <= reg");
+        }
+    }
+    // MOV [mem] <= imm
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        uint64_t value = src.imm.value.u;
+        if (instr->info.operand_width == 64) {
+            WriteEffectiveMemory(dst, value);
+            LOG(L"[+] MOV qword [mem] <= imm");
+        }
+        else if (instr->info.operand_width == 32) {
+            WriteEffectiveMemory(dst, static_cast<uint32_t>(value));
+            LOG(L"[+] MOV dword [mem] <= imm");
+        }
+        else if (instr->info.operand_width == 16) {
+            WriteEffectiveMemory(dst, static_cast<uint16_t>(value));
+            LOG(L"[+] MOV word [mem] <= imm");
+        }
+        else if (instr->info.operand_width == 8) {
+            WriteEffectiveMemory(dst, static_cast<uint8_t>(value));
+            LOG(L"[+] MOV byte [mem] <= imm");
+        }
+    }
+    else {
+        LOG(L"[!] Unsupported MOV instruction");
     }
 }
 
@@ -582,7 +888,16 @@ void emulate_setnz(const ZydisDisassembledInstruction* instr) {
     set_register_value<uint8_t>(dst.reg.value, value);
     LOG(L"[+] SETNZ => " << std::hex << static_cast<int>(value));
 }
-
+void emulate_jl(const ZydisDisassembledInstruction* instr) {
+    // SF ≠ OF
+    if (g_regs.rflags.flags.SF != g_regs.rflags.flags.OF) {
+        g_regs.rip = instr->operands[0].imm.value.s;
+    }
+    else {
+        g_regs.rip += instr->info.length;
+    }
+    LOG(L"[+] JL to => 0x" << std::hex << g_regs.rip);
+}
 void emulate_setz(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     uint8_t value = g_regs.rflags.flags.ZF;
@@ -608,6 +923,11 @@ void start_emulation(uint64_t startAddress) {
             std::wcout << L"0x" << std::hex << disasm.Address()
                 << L": " << std::wstring(instrText.begin(), instrText.end()) << std::endl;
 
+            bool has_lock = (instr.attributes & ZYDIS_ATTRIB_HAS_LOCK) != 0;
+            if (has_lock) {
+                std::wcout << L"[~] LOCK prefix detected." << std::endl;
+            }
+
             auto it = dispatch_table.find(instr.mnemonic);
             if (it != dispatch_table.end()) {
                 it->second(op);
@@ -617,18 +937,18 @@ void start_emulation(uint64_t startAddress) {
                     << std::wstring(instrText.begin(), instrText.end()) << std::endl;
             }
 
-            if (
+
+            if (!disasm.IsJump() &&
                 instr.mnemonic != ZYDIS_MNEMONIC_CALL &&
-                instr.mnemonic != ZYDIS_MNEMONIC_RET &&
-                instr.mnemonic != ZYDIS_MNEMONIC_JMP &&
-                instr.mnemonic != ZYDIS_MNEMONIC_JZ &&
-                instr.mnemonic != ZYDIS_MNEMONIC_JNZ
-                ) {
+                instr.mnemonic != ZYDIS_MNEMONIC_RET)
+            {
                 g_regs.rip += instr.length;
             }
 
+
             address = g_regs.rip;
         }
+
         else {
             std::wcout << L"Failed to disassemble at address 0x" << std::hex << address << std::endl;
             break;
@@ -737,7 +1057,12 @@ int main() {
         { ZYDIS_MNEMONIC_IMUL, emulate_imul },
         { ZYDIS_MNEMONIC_SETNZ, emulate_setnz },
         { ZYDIS_MNEMONIC_SETZ, emulate_setz },
-        // Add more instructions as needed...
+        { ZYDIS_MNEMONIC_BT, emulate_bt },      
+        { ZYDIS_MNEMONIC_BTR, emulate_btr },    
+        { ZYDIS_MNEMONIC_JNB, emulate_jnb },    
+        { ZYDIS_MNEMONIC_XGETBV, emulate_xgetbv },
+        { ZYDIS_MNEMONIC_JL, emulate_jl },
+        { ZYDIS_MNEMONIC_CMPXCHG, emulate_cmpxchg },
     };
 
     STARTUPINFOW si = { sizeof(si) };

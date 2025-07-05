@@ -3,10 +3,14 @@
 #
 cmake_minimum_required (VERSION 3.8)
 
-project ("My_CPU")
+project ("My_CPU" LANGUAGES C CXX ASM_MASM)
+
+if(MSVC)
+    set_source_files_properties(xgetbv.asm PROPERTIES LANGUAGE ASM_MASM)
+endif()
 
 # Add source to this project's executable.
-add_executable (My_CPU "My_CPU.cpp"   )
+add_executable (My_CPU "My_CPU.cpp"  "xgetbv.asm" )
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET My_CPU PROPERTY CXX_STANDARD 20)
