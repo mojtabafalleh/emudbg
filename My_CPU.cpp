@@ -17,6 +17,11 @@
 
 HANDLE hProcess;
 
+extern "C" void __cdecl xgetbv_asm(uint32_t ecx, uint32_t* out_eax, uint32_t* out_edx);
+
+
+template<typename T>
+T get_register_value(ZydisRegister reg);
 // ------------------- Register Structures -------------------
 union GPR {
     uint64_t q;
