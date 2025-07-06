@@ -8,12 +8,46 @@
 #include <cstdint>
 #include "zydis_wrapper.h"
 
+void DumpRegisters();
+ ZydisDecodedInstruction instr;
+
 #define LOG_ENABLED 1
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
 #define LOG(x)
 #endif
+
+typedef enum _THREADINFOCLASS {
+    ThreadBasicInformation = 0
+} THREADINFOCLASS;
+
+typedef struct _CLIENT_ID {
+    HANDLE UniqueProcess;
+    HANDLE UniqueThread;
+} CLIENT_ID;
+typedef NTSTATUS(NTAPI* NtQueryInformationThreadPtr)(
+    HANDLE ThreadHandle,
+    THREADINFOCLASS ThreadInformationClass,
+    PVOID ThreadInformation,
+    ULONG ThreadInformationLength,
+    PULONG ReturnLength
+    );
+typedef struct _THREAD_BASIC_INFORMATION {
+    NTSTATUS ExitStatus;
+    PVOID TebBaseAddress;
+    CLIENT_ID ClientId;
+    KAFFINITY AffinityMask;
+    LONG Priority;
+    LONG BasePriority;
+} THREAD_BASIC_INFORMATION;
+extern "C" NTSTATUS NTAPI NtQueryInformationThread(
+    HANDLE ThreadHandle,
+    THREADINFOCLASS ThreadInformationClass,
+    PVOID ThreadInformation,
+    ULONG ThreadInformationLength,
+    PULONG ReturnLength
+);
 
 HANDLE hProcess;
 
@@ -56,6 +90,8 @@ struct RegState {
     uint64_t rip;
     RFlags rflags;
     uint8_t xmm[16][16];
+    uint64_t gs_base;
+    uint64_t fs_base;
 } g_regs;
 
 // ------------------- Memory I/O Helpers -------------------
@@ -70,33 +106,75 @@ bool WriteMemory(uint64_t address, const void* buffer, SIZE_T size) {
 }
 
 template<typename T>
-bool AccessMemory(bool write, uint64_t base, uint64_t index, uint8_t scale, int64_t disp, T* inout) {
-    uint64_t address = base + (index * scale) + disp;
-    return write ? WriteMemory(address, inout, sizeof(T)) : ReadMemory(address, inout, sizeof(T));
+bool AccessMemory(bool write, uint64_t address, T* inout) {
+    return write ? WriteMemory(address, inout, sizeof(T))
+        : ReadMemory(address, inout, sizeof(T));
 }
-
 template<typename T>
 bool AccessEffectiveMemory(const ZydisDecodedOperand& op, T* inout, bool write) {
     if (op.type != ZYDIS_OPERAND_TYPE_MEMORY) return false;
 
-    uint64_t base = (op.mem.base != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(op.mem.base) : 0;
-    uint64_t index = (op.mem.index != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(op.mem.index) : 0;
-    uint8_t scale = static_cast<uint8_t>(op.mem.scale);
-    int64_t disp = op.mem.disp.value;
+    uint64_t address = 0;
 
-    uint64_t address = base + (index * scale) + disp;
-    bool success = write 
-        ? WriteMemory(address, inout, sizeof(T)) 
-        : ReadMemory(address, inout, sizeof(T));
+    // Handle absolute addressing (no base, no index)
+    if (op.mem.base == ZYDIS_REGISTER_NONE && op.mem.index == ZYDIS_REGISTER_NONE) {
+        address = op.mem.disp.has_displacement ? op.mem.disp.value : 0;
+        LOG(L"[+] Absolute memory addressing");
+    }
+    else {
+        // Handle RIP-relative addressing
+        if (op.mem.base == ZYDIS_REGISTER_RIP) {
+            address = g_regs.rip + instr.length;
+            LOG(L"[+] RIP-relative base : " << std::hex << address);
+        }
+        else if (op.mem.base != ZYDIS_REGISTER_NONE) {
+            address = get_register_value<uint64_t>(op.mem.base);
+        }
+
+        // Handle index
+        if (op.mem.index != ZYDIS_REGISTER_NONE) {
+            uint64_t index_value = get_register_value<uint64_t>(op.mem.index);
+            address += index_value * op.mem.scale;
+        }
+
+        // Add displacement
+        if (op.mem.disp.has_displacement) {
+            address += op.mem.disp.value;
+        }
+    }
+
+    // Handle segment override (FS/GS for Windows)
+    switch (op.mem.segment) {
+    case ZYDIS_REGISTER_FS:
+        address += g_regs.fs_base;
+        LOG(L"[+] Using FS segment base");
+        break;
+    case ZYDIS_REGISTER_GS:
+        address += g_regs.gs_base;
+        LOG(L"[+] Using GS segment base");
+        break;
+    default:
+        // No segment override or unhandled segment
+        break;
+    }
+
+    // Log final computed address
+    LOG(L"[+] AccessEffectiveMemory Final Address : " << std::hex << address);
+
+    // Access memory
+    bool success = write ? WriteMemory(address, inout, sizeof(T)) : ReadMemory(address, inout, sizeof(T));
 
     if (!success) {
         std::cerr << std::hex << std::setfill('0');
-        std::cerr << "[!] Memory " << (write ? "write" : "read") << " failed at address 0x" 
-                  << address << " (RIP: 0x" << std::hex << g_regs.rip << ")\n";
+        std::cerr << "[!] Memory " << (write ? "write" : "read") << " failed at address 0x"
+            << address << " (RIP: 0x" << g_regs.rip << ")\n";
+        DumpRegisters();
+        DebugBreak();
     }
 
     return success;
 }
+
 
 template<typename T>
 bool ReadEffectiveMemory(const ZydisDecodedOperand& op, T* out) {
@@ -191,7 +269,9 @@ std::unordered_map<ZydisRegister, void*> reg_lookup = {
     { ZYDIS_REGISTER_RIP, &g_regs.rip },
     // RFLAGS
     { ZYDIS_REGISTER_RFLAGS, &g_regs.rflags },
+    { ZYDIS_REGISTER_GS, &g_regs.gs_base },     
 };
+
 
 template<typename T>
 T get_register_value(ZydisRegister reg) {
@@ -203,6 +283,40 @@ template<typename T>
 void set_register_value(ZydisRegister reg, T value) {
     auto it = reg_lookup.find(reg);
     if (it != reg_lookup.end()) *reinterpret_cast<T*>(it->second) = value;
+}
+void DumpRegisters() {
+    std::wcout << L"===== Register Dump =====" << std::endl;
+#define DUMP(reg) std::wcout << L#reg << L": 0x" << std::hex << std::setw(16) << std::setfill(L'0') << g_regs.reg.q << std::endl
+
+    DUMP(rax);
+    DUMP(rbx);
+    DUMP(rcx);
+    DUMP(rdx);
+    DUMP(rsi);
+    DUMP(rdi);
+    DUMP(rbp);
+    DUMP(rsp);
+    DUMP(r8);
+    DUMP(r9);
+    DUMP(r10);
+    DUMP(r11);
+    DUMP(r12);
+    DUMP(r13);
+    DUMP(r14);
+    DUMP(r15);
+
+    std::wcout << L"RIP: 0x" << std::hex << std::setw(16) << g_regs.rip << std::endl;
+    std::wcout << L"RFLAGS: 0x" << std::hex << std::setw(16) << g_regs.rflags.value << std::endl;
+
+    std::wcout << L"Flags => "
+        << L"CF=" << g_regs.rflags.flags.CF << L", "
+        << L"PF=" << g_regs.rflags.flags.PF << L", "
+        << L"ZF=" << g_regs.rflags.flags.ZF << L", "
+        << L"SF=" << g_regs.rflags.flags.SF << L", "
+        << L"OF=" << g_regs.rflags.flags.OF
+        << std::endl;
+    std::wcout << L"GS:  0x" << std::hex << std::setw(16) << g_regs.gs_base << std::endl;
+    std::wcout << L"==========================" << std::endl;
 }
 
 // ------------------- Flag Helpers -------------------
@@ -307,12 +421,19 @@ void emulate_or(const ZydisDisassembledInstruction* instr) {
 void emulate_lea(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& mem = instr->operands[1].mem;
-    uint64_t base = (mem.base != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(mem.base) : 0;
+    uint64_t base = 0;
+    if (mem.base != ZYDIS_REGISTER_NONE) {
+        base = get_register_value<uint64_t>(mem.base);
+        if (mem.base == ZYDIS_REGISTER_RIP) {
+            base += instr->info.length;
+        }
+    }
     uint64_t index = (mem.index != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(mem.index) : 0;
     uint64_t value = base + index * mem.scale + mem.disp.value;
     set_register_value<uint64_t>(dst.reg.value, value);
     LOG(L"[+] LEA => 0x" << std::hex << value);
 }
+
 void emulate_cmpxchg(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
@@ -438,7 +559,7 @@ void emulate_cmpxchg(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-    g_regs.rflags.flags.ZF =  equal;
+    g_regs.rflags.flags.ZF = equal;
     LOG(L"[+] CMPXCHG => ZF=" << (equal ? "1" : "0"));
 }
 
@@ -461,6 +582,7 @@ void emulate_add(const ZydisDisassembledInstruction* instr) {
     update_flags_add(result, lhs, rhs, instr->info.operand_width);
     LOG(L"[+] ADD => 0x" << std::hex << result);
 }
+
 void emulate_bt(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
@@ -590,6 +712,78 @@ void emulate_jz(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] JZ to => 0x" << std::hex << g_regs.rip);
 }
 
+void emulate_movsxd(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+
+    // validate destination
+    if (dst.type != ZYDIS_OPERAND_TYPE_REGISTER ||
+        dst.reg.value < ZYDIS_REGISTER_RAX || dst.reg.value > ZYDIS_REGISTER_R15) {
+        LOG(L"[!] Invalid destination register for MOVSXD");
+        return;
+    }
+
+    int64_t src_value = 0;
+
+    // MOVSXD reg, reg32
+    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        // Check if it's a 32-bit register
+        if (src.size == 32) {
+            int32_t value32 = get_register_value<int32_t>(src.reg.value);
+            src_value = static_cast<int64_t>(value32);
+            LOG(L"[+] MOVSXD reg <= reg32 (" << std::hex << src_value << L")");
+        }
+        else {
+            LOG(L"[!] Unsupported source register size for MOVSXD");
+            return;
+        }
+    }
+
+    // MOVSXD reg, [mem]
+    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        // src.size gives actual memory operand size
+        if (src.size != 32) {
+            LOG(L"[!] Unsupported memory operand size for MOVSXD (expected 32-bit)");
+            return;
+        }
+
+        int32_t mem_value = 0;
+        if (!ReadEffectiveMemory(src, &mem_value)) {
+            LOG(L"[!] Failed to read memory for MOVSXD");
+            return;
+        }
+
+        src_value = static_cast<int64_t>(mem_value);
+        LOG(L"[+] MOVSXD reg <= dword [mem] (" << std::hex << src_value << L")");
+    }
+
+    else {
+        LOG(L"[!] Unsupported source operand type for MOVSXD");
+        return;
+    }
+
+    // Write result
+    set_register_value<int64_t>(dst.reg.value, src_value);
+}
+
+
+void emulate_jle(const ZydisDisassembledInstruction* instr) {
+    const auto& op = instr->operands[0];
+    if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        // Check condition: ZF=1 OR (SF != OF)
+        if (g_regs.rflags.flags.ZF || (g_regs.rflags.flags.SF != g_regs.rflags.flags.OF)) {
+            g_regs.rip = op.imm.value.s;
+        }
+        else {
+            g_regs.rip += instr->info.length;
+        }
+    }
+    else {
+        std::wcout << L"[!] Unsupported operand type for JLE" << std::endl;
+        g_regs.rip += instr->info.length;
+    }
+    LOG(L"[+] JLE to => 0x" << std::hex << g_regs.rip);
+}
 void emulate_jnz(const ZydisDisassembledInstruction* instr) {
     if (!g_regs.rflags.flags.ZF)
         g_regs.rip = instr->operands[0].imm.value.s;
@@ -622,7 +816,7 @@ void emulate_mov(const ZydisDisassembledInstruction* instr) {
             uint64_t value;
             if (ReadEffectiveMemory(src, &value)) {
                 set_register_value<uint64_t>(dst.reg.value, value);
-                LOG(L"[+] MOV reg <= qword [mem]");
+
             }
         }
         else if (instr->info.operand_width == 32) {
@@ -701,7 +895,77 @@ void emulate_sub(const ZydisDisassembledInstruction* instr) {
     update_flags_sub(result, lhs, rhs, instr->info.operand_width);
     LOG(L"[+] SUB => 0x" << std::hex << result);
 }
+void emulate_movzx(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
 
+    // فقط برای ثبات ها پشتیبانی می‌کنیم
+    if (src.type != ZYDIS_OPERAND_TYPE_REGISTER || dst.type != ZYDIS_OPERAND_TYPE_REGISTER) {
+        LOG(L"[!] Unsupported operand type for MOVZX");
+        return;
+    }
+
+    uint64_t src_size = instr->operands[1].size;
+    uint64_t dst_size = instr->operands[0].size;
+
+    // فقط حالت‌های زیر را پشتیبانی می‌کنیم:
+    // - 8 -> 16/32/64
+    // - 16 -> 32/64
+    // - 32 -> 64
+    if ((src_size == 8 && dst_size == 16) ||
+        (src_size == 8 && dst_size == 32) ||
+        (src_size == 8 && dst_size == 64) ||
+        (src_size == 16 && dst_size == 32) ||
+        (src_size == 16 && dst_size == 64) ||
+        (src_size == 32 && dst_size == 64)) {
+
+        // خواندن مقدار از منبع
+        uint64_t src_value = get_register_value<uint64_t>(src.reg.value);
+
+        // گسترش بدون علامت
+        switch (src_size) {
+        case 8: {
+            uint8_t val = static_cast<uint8_t>(src_value);
+            set_register_value<uint64_t>(dst.reg.value, val);
+            break;
+        }
+        case 16: {
+            uint16_t val = static_cast<uint16_t>(src_value);
+            set_register_value<uint64_t>(dst.reg.value, val);
+            break;
+        }
+        case 32: {
+            uint32_t val = static_cast<uint32_t>(src_value);
+            set_register_value<uint64_t>(dst.reg.value, val);
+            break;
+        }
+        default:
+            LOG(L"[!] Invalid source size for MOVZX");
+            return;
+        }
+
+        LOG(L"[+] MOVZX => R" << dst.reg.value << L" = 0x" << std::hex << get_register_value<uint64_t>(dst.reg.value));
+    }
+    else {
+        LOG(L"[!] Unsupported operand width for MOVZX");
+    }
+}
+void emulate_jb(const ZydisDisassembledInstruction* instr) {
+    const auto& op = instr->operands[0];
+    if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        if (g_regs.rflags.flags.CF) {
+            g_regs.rip = op.imm.value.s;
+        }
+        else {
+            g_regs.rip += instr->info.length;
+        }
+        LOG(L"[+] JB to => 0x" << std::hex << g_regs.rip);
+    }
+    else {
+        LOG(L"[!] Unsupported operand type for JB");
+        g_regs.rip += instr->info.length;
+    }
+}
 void emulate_call(const ZydisDisassembledInstruction* instr) {
     uint64_t return_address = g_regs.rip + instr->info.length;
 
@@ -720,15 +984,9 @@ void emulate_call(const ZydisDisassembledInstruction* instr) {
         target_rip = get_register_value<uint64_t>(op.reg.value);
     }
     else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        uint64_t base = (op.mem.base != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(op.mem.base) : 0;
-        uint64_t index = (op.mem.index != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(op.mem.index) : 0;
-        uint64_t disp = op.mem.disp.value;
 
-        uint64_t address = base + index * op.mem.scale + disp;
-
-        // Read QWORD from memory at calculated address
-        if (!ReadMemory(address, &target_rip, sizeof(target_rip))) {
-            std::wcout << L"[!] Failed to read memory at 0x" << std::hex << address << std::endl;
+        if (!ReadEffectiveMemory(op, &target_rip)) {
+            std::wcout << L"[!] Failed to read memory (effective address) for CALL" << std::endl;
             return;
         }
     }
@@ -740,6 +998,7 @@ void emulate_call(const ZydisDisassembledInstruction* instr) {
     g_regs.rip = target_rip;
     LOG(L"[+] CALL => 0x" << std::hex << g_regs.rip);
 }
+
 
 void emulate_ret(const ZydisDisassembledInstruction*) {
     uint64_t ret_addr = 0;
@@ -835,7 +1094,7 @@ void emulate_jmp(const ZydisDisassembledInstruction* instr) {
         uint64_t index = (op.mem.index != ZYDIS_REGISTER_NONE) ? get_register_value<uint64_t>(op.mem.index) : 0;
         uint64_t disp = op.mem.disp.value;
 
-        uint64_t address = base + index * op.mem.scale + disp +instr->info.length;
+        uint64_t address = base + index * op.mem.scale + disp + instr->info.length;
         uint64_t targetRip = 0;
         if (!ReadMemory(address, &targetRip, sizeof(targetRip))) {
             std::wcout << L"[!] Failed to read memory at 0x" << std::hex << address << std::endl;
@@ -913,11 +1172,13 @@ void start_emulation(uint64_t startAddress) {
     Zydis disasm(true);
 
     while (true) {
+    //only for debugging purposes
+    //DumpRegisters();
         if (!ReadProcessMemory(hProcess, (LPCVOID)address, buffer, sizeof(buffer), &bytesRead) || bytesRead == 0)
             break;
         if (disasm.Disassemble(address, buffer, bytesRead)) {
             const ZydisDisassembledInstruction* op = disasm.GetInstr();
-            const ZydisDecodedInstruction& instr = op->info;
+            instr = op->info;
 
             std::string instrText = disasm.InstructionText();
             std::wcout << L"0x" << std::hex << disasm.Address()
@@ -935,6 +1196,7 @@ void start_emulation(uint64_t startAddress) {
             else {
                 std::wcout << L"[!] Instruction not implemented: "
                     << std::wstring(instrText.begin(), instrText.end()) << std::endl;
+                DebugBreak();
             }
 
 
@@ -973,7 +1235,21 @@ uint32_t GetEntryPointRVA(const std::wstring& exePath) {
     file.read(reinterpret_cast<char*>(&optionalHeader), sizeof(optionalHeader));
     return optionalHeader.AddressOfEntryPoint;
 }
+uint64_t GetTEBAddress(HANDLE hThread) {
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return 0;
 
+    auto NtQueryInformationThread = reinterpret_cast<NtQueryInformationThreadPtr>(
+        GetProcAddress(ntdll, "NtQueryInformationThread"));
+
+    if (!NtQueryInformationThread) return 0;
+
+    THREAD_BASIC_INFORMATION tbi = {};
+    if (NtQueryInformationThread(hThread, ThreadBasicInformation, &tbi, sizeof(tbi), nullptr) != 0)
+        return 0;
+
+    return reinterpret_cast<uint64_t>(tbi.TebBaseAddress);
+}
 std::vector<uint32_t> GetTLSCallbackRVAs(const std::wstring& exePath) {
     std::vector<uint32_t> tlsCallbacks;
     std::ifstream file(exePath, std::ios::binary);
@@ -1057,12 +1333,17 @@ int main() {
         { ZYDIS_MNEMONIC_IMUL, emulate_imul },
         { ZYDIS_MNEMONIC_SETNZ, emulate_setnz },
         { ZYDIS_MNEMONIC_SETZ, emulate_setz },
-        { ZYDIS_MNEMONIC_BT, emulate_bt },      
-        { ZYDIS_MNEMONIC_BTR, emulate_btr },    
-        { ZYDIS_MNEMONIC_JNB, emulate_jnb },    
+        { ZYDIS_MNEMONIC_BT, emulate_bt },
+        { ZYDIS_MNEMONIC_BTR, emulate_btr },
+        { ZYDIS_MNEMONIC_JNB, emulate_jnb },
         { ZYDIS_MNEMONIC_XGETBV, emulate_xgetbv },
         { ZYDIS_MNEMONIC_JL, emulate_jl },
         { ZYDIS_MNEMONIC_CMPXCHG, emulate_cmpxchg },
+        { ZYDIS_MNEMONIC_JLE, emulate_jle },
+        { ZYDIS_MNEMONIC_MOVSXD, emulate_movsxd },
+        { ZYDIS_MNEMONIC_MOVZX, emulate_movzx },
+        { ZYDIS_MNEMONIC_DEC, emulate_dec },
+        { ZYDIS_MNEMONIC_JB, emulate_jb },
     };
 
     STARTUPINFOW si = { sizeof(si) };
@@ -1107,6 +1388,8 @@ int main() {
                         SetThreadContext(hThread, &ctx);
                         g_regs.rip = ctx.Rip;
                     }
+                    
+                    g_regs.gs_base = GetTEBAddress(hThread);
                     hProcess = pi.hProcess;
                     g_regs.rax.q = ctx.Rax;
                     g_regs.rbx.q = ctx.Rbx;
