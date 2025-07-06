@@ -7,9 +7,19 @@
 #include <filesystem>
 #include <cstdint>
 #include "zydis_wrapper.h"
+#include <tlhelp32.h>
+
+
 
 void DumpRegisters();
+void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread);
+
+IMAGE_OPTIONAL_HEADER64 optionalHeader;
  ZydisDecodedInstruction instr;
+ uint64_t startaddr, endaddr;
+ uint64_t lastBreakpointAddr = 0;
+ BYTE lastOrigByte = 0;
+ PROCESS_INFORMATION pi;
 
 #define LOG_ENABLED 1
 #if LOG_ENABLED
@@ -899,7 +909,7 @@ void emulate_movzx(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
 
-    // فقط برای ثبات ها پشتیبانی می‌کنیم
+  
     if (src.type != ZYDIS_OPERAND_TYPE_REGISTER || dst.type != ZYDIS_OPERAND_TYPE_REGISTER) {
         LOG(L"[!] Unsupported operand type for MOVZX");
         return;
@@ -908,10 +918,6 @@ void emulate_movzx(const ZydisDisassembledInstruction* instr) {
     uint64_t src_size = instr->operands[1].size;
     uint64_t dst_size = instr->operands[0].size;
 
-    // فقط حالت‌های زیر را پشتیبانی می‌کنیم:
-    // - 8 -> 16/32/64
-    // - 16 -> 32/64
-    // - 32 -> 64
     if ((src_size == 8 && dst_size == 16) ||
         (src_size == 8 && dst_size == 32) ||
         (src_size == 8 && dst_size == 64) ||
@@ -919,10 +925,8 @@ void emulate_movzx(const ZydisDisassembledInstruction* instr) {
         (src_size == 16 && dst_size == 64) ||
         (src_size == 32 && dst_size == 64)) {
 
-        // خواندن مقدار از منبع
         uint64_t src_value = get_register_value<uint64_t>(src.reg.value);
 
-        // گسترش بدون علامت
         switch (src_size) {
         case 8: {
             uint8_t val = static_cast<uint8_t>(src_value);
@@ -1027,7 +1031,22 @@ void emulate_shr(const ZydisDisassembledInstruction* instr) {
     set_register_value<uint64_t>(dst.reg.value, val);
     LOG(L"[+] SHR => 0x" << std::hex << val);
 }
-
+void emulate_jbe(const ZydisDisassembledInstruction* instr) {
+    const auto& op = instr->operands[0];
+    if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        if (g_regs.rflags.flags.CF || g_regs.rflags.flags.ZF) {
+            g_regs.rip = op.imm.value.s;
+        }
+        else {
+            g_regs.rip += instr->info.length;
+        }
+        LOG(L"[+] JBE to => 0x" << std::hex << g_regs.rip);
+    }
+    else {
+        LOG(L"[!] Unsupported operand type for JBE");
+        g_regs.rip += instr->info.length;
+    }
+}
 void emulate_sar(const ZydisDisassembledInstruction* instr) {
     auto& dst = instr->operands[0];
     auto& src = instr->operands[1];
@@ -1054,14 +1073,54 @@ void emulate_cpuid(const ZydisDisassembledInstruction*) {
 void emulate_test(const ZydisDisassembledInstruction* instr) {
     auto& op1 = instr->operands[0];
     auto& op2 = instr->operands[1];
-    uint64_t lhs = get_register_value<uint64_t>(op1.reg.value);
-    uint64_t rhs = get_register_value<uint64_t>(op2.reg.value);
-    uint64_t result = lhs & rhs;
+
+    uint64_t lhs = 0, rhs = 0;
+    uint64_t result = 0;
+
+    switch (instr->info.operand_width) {
+    case 8: {
+        uint8_t v1 = get_register_value<uint8_t>(op1.reg.value);
+        uint8_t v2 = get_register_value<uint8_t>(op2.reg.value);
+        lhs = v1;
+        rhs = v2;
+        result = v1 & v2;
+        break;
+    }
+    case 16: {
+        uint16_t v1 = get_register_value<uint16_t>(op1.reg.value);
+        uint16_t v2 = get_register_value<uint16_t>(op2.reg.value);
+        lhs = v1;
+        rhs = v2;
+        result = v1 & v2;
+        break;
+    }
+    case 32: {
+        uint32_t v1 = get_register_value<uint32_t>(op1.reg.value);
+        uint32_t v2 = get_register_value<uint32_t>(op2.reg.value);
+        lhs = v1;
+        rhs = v2;
+        result = v1 & v2;
+        break;
+    }
+    case 64: {
+        lhs = get_register_value<uint64_t>(op1.reg.value);
+        rhs = get_register_value<uint64_t>(op2.reg.value);
+        result = lhs & rhs;
+        break;
+    }
+    default:
+        LOG(L"[!] Unsupported operand width for TEST");
+        return;
+    }
+
+    // Update flags
     g_regs.rflags.flags.ZF = (result == 0);
     g_regs.rflags.flags.SF = (result >> (instr->info.operand_width - 1)) & 1;
     g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
+
     LOG(L"[+] TEST => 0x" << std::hex << lhs << L" & 0x" << rhs);
 }
+
 
 void emulate_not(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -1206,9 +1265,13 @@ void start_emulation(uint64_t startAddress) {
             {
                 g_regs.rip += instr.length;
             }
-
-
             address = g_regs.rip;
+            if (!(address >= startaddr && address <= endaddr)) {
+                uint64_t value = 0;
+                ReadMemory(g_regs.rsp.q, &value, 8);
+                SetSingleBreakpointAndEmulate(pi.hProcess, value,pi.hThread);
+            }
+
         }
 
         else {
@@ -1231,7 +1294,6 @@ uint32_t GetEntryPointRVA(const std::wstring& exePath) {
     if (ntSignature != IMAGE_NT_SIGNATURE) return 0;
     IMAGE_FILE_HEADER fileHeader;
     file.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
-    IMAGE_OPTIONAL_HEADER64 optionalHeader;
     file.read(reinterpret_cast<char*>(&optionalHeader), sizeof(optionalHeader));
     return optionalHeader.AddressOfEntryPoint;
 }
@@ -1300,6 +1362,134 @@ std::vector<uint32_t> GetTLSCallbackRVAs(const std::wstring& exePath) {
     return tlsCallbacks;
 }
 
+void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread) {
+    // Set new breakpoint
+    BYTE origByte;
+    if (!SetBreakpoint(hProcess, newAddress, origByte)) {
+        std::wcout << L"[!] Failed to set breakpoint at 0x" << std::hex << newAddress << std::endl;
+        exit(0);
+        return;
+    }
+
+    lastBreakpointAddr = newAddress;
+    lastOrigByte = origByte;
+
+    CONTEXT ctx = { 0 };
+    ctx.ContextFlags = CONTEXT_FULL;
+    if (GetThreadContext(hThread, &ctx)) {
+        ctx.Rip = g_regs.rip;
+        ctx.Rsp = g_regs.rsp.q;
+        ctx.Rbp = g_regs.rbp.q;
+        ctx.Rax = g_regs.rax.q;
+        ctx.Rbx = g_regs.rbx.q;
+        ctx.Rcx = g_regs.rcx.q;
+        ctx.Rdx = g_regs.rdx.q;
+        ctx.Rsi = g_regs.rsi.q;
+        ctx.Rdi = g_regs.rdi.q;
+        ctx.R8 = g_regs.r8.q;
+        ctx.R9 = g_regs.r9.q;
+        ctx.R10 = g_regs.r10.q;
+        ctx.R11 = g_regs.r11.q;
+        ctx.R12 = g_regs.r12.q;
+        ctx.R13 = g_regs.r13.q;
+        ctx.R14 = g_regs.r14.q;
+        ctx.R15 = g_regs.r15.q;
+        ctx.EFlags = static_cast<DWORD>(g_regs.rflags.value);
+
+        if (!SetThreadContext(hThread, &ctx)) {
+            std::wcout << L"[!] Failed to set thread context before continuing" << std::endl;
+            return;
+        }
+    }
+    else {
+        std::wcout << L"[!] Failed to get thread context before continuing" << std::endl;
+        return;
+    }
+    ContinueDebugEvent(pi.dwProcessId, GetThreadId(hThread), DBG_CONTINUE);
+    DEBUG_EVENT dbgEvent;
+    while (true) {
+        if (!WaitForDebugEvent(&dbgEvent, INFINITE)) break;
+
+        DWORD continueStatus = DBG_CONTINUE;
+
+        if (dbgEvent.dwDebugEventCode == EXCEPTION_DEBUG_EVENT) {
+            auto& er = dbgEvent.u.Exception.ExceptionRecord;
+            if (er.ExceptionCode == EXCEPTION_BREAKPOINT) {
+                uint64_t exAddr = reinterpret_cast<uint64_t>(er.ExceptionAddress);
+                if (exAddr == newAddress) {
+                    // Remove breakpoint
+                    RemoveBreakpoint(hProcess, newAddress, origByte);
+
+                    // Adjust RIP
+                    CONTEXT ctxHit = { 0 };
+                    ctxHit.ContextFlags = CONTEXT_FULL;
+                    if (GetThreadContext(hThread, &ctxHit)) {
+                        ctxHit.Rip -= 1;
+                        SetThreadContext(hThread, &ctxHit);
+
+                        // Update g_regs from ctx
+                        g_regs.rip = ctxHit.Rip;
+                        g_regs.rsp.q = ctxHit.Rsp;
+                        g_regs.rbp.q = ctxHit.Rbp;
+                        g_regs.rax.q = ctxHit.Rax;
+                        g_regs.rbx.q = ctxHit.Rbx;
+                        g_regs.rcx.q = ctxHit.Rcx;
+                        g_regs.rdx.q = ctxHit.Rdx;
+                        g_regs.rsi.q = ctxHit.Rsi;
+                        g_regs.rdi.q = ctxHit.Rdi;
+                        g_regs.r8.q = ctxHit.R8;
+                        g_regs.r9.q = ctxHit.R9;
+                        g_regs.r10.q = ctxHit.R10;
+                        g_regs.r11.q = ctxHit.R11;
+                        g_regs.r12.q = ctxHit.R12;
+                        g_regs.r13.q = ctxHit.R13;
+                        g_regs.r14.q = ctxHit.R14;
+                        g_regs.r15.q = ctxHit.R15;
+                        g_regs.rflags.value = ctxHit.EFlags;
+                    }
+
+                    // Emulate from breakpoint address
+                    start_emulation(exAddr);
+                    break;
+                }
+            }
+        }
+        else  {
+            exit(0);
+        }
+
+    }
+
+
+    
+}
+
+void GetModuleRange(DWORD pid, const std::wstring& moduleName) {
+    MODULEENTRY32W modEntry = { 0 };
+    modEntry.dwSize = sizeof(MODULEENTRY32W);
+
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+    if (hSnap == INVALID_HANDLE_VALUE) {
+        std::wcout << L"[!] CreateToolhelp32Snapshot failed" << std::endl;
+        return;
+    }
+
+    if (Module32FirstW(hSnap, &modEntry)) {
+        do {
+            if (_wcsicmp(modEntry.szModule, moduleName.c_str()) == 0) {
+                startaddr = reinterpret_cast<uint64_t>(modEntry.modBaseAddr) ;
+                
+                endaddr = (reinterpret_cast<uint64_t>(modEntry.modBaseAddr) + modEntry.modBaseSize) ;
+                break;
+            }
+        } while (Module32NextW(hSnap, &modEntry));
+    }
+    else {
+        std::wcout << L"[!] Module32FirstW failed" << std::endl;
+    }
+
+    CloseHandle(hSnap);
+}
 // ------------------- Main -------------------
 int main() {
     dispatch_table = {
@@ -1344,10 +1534,11 @@ int main() {
         { ZYDIS_MNEMONIC_MOVZX, emulate_movzx },
         { ZYDIS_MNEMONIC_DEC, emulate_dec },
         { ZYDIS_MNEMONIC_JB, emulate_jb },
+        { ZYDIS_MNEMONIC_JBE, emulate_jbe },
     };
 
     STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
+
     std::wstring exePath = L"D:\\Project\\emulator\\binary\\helloworld.exe";
     uint32_t entryRVA = GetEntryPointRVA(exePath);
     auto tlsRVAs = GetTLSCallbackRVAs(exePath);
@@ -1355,12 +1546,15 @@ int main() {
     DEBUG_EVENT dbgEvent = {};
     uint64_t baseAddress = 0;
     std::unordered_map<uint64_t, BYTE> breakpoints;
+
     while (true) {
         if (!WaitForDebugEvent(&dbgEvent, INFINITE)) break;
         DWORD continueStatus = DBG_CONTINUE;
         switch (dbgEvent.dwDebugEventCode) {
         case CREATE_PROCESS_DEBUG_EVENT: {
             baseAddress = reinterpret_cast<uint64_t>(dbgEvent.u.CreateProcessInfo.lpBaseOfImage);
+            endaddr = baseAddress + optionalHeader.SizeOfImage;
+            startaddr = baseAddress;
             if (entryRVA) {
                 BYTE orig;
                 uint64_t addr = baseAddress + entryRVA;
@@ -1418,7 +1612,7 @@ int main() {
         case EXIT_PROCESS_DEBUG_EVENT:
             goto cleanup;
         }
-        ContinueDebugEvent(dbgEvent.dwProcessId, dbgEvent.dwThreadId, continueStatus);
+       ContinueDebugEvent(dbgEvent.dwProcessId, dbgEvent.dwThreadId, continueStatus);
     }
 cleanup:
     CloseHandle(pi.hProcess);
