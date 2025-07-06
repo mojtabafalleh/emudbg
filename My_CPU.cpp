@@ -169,7 +169,7 @@ bool AccessEffectiveMemory(const ZydisDecodedOperand& op, T* inout, bool write) 
         std::cerr << "[!] Memory " << (write ? "write" : "read") << " failed at address 0x"
             << address << " (RIP: 0x" << g_regs.rip << ")\n";
         DumpRegisters();
-        DebugBreak();
+        exit(0);
     }
 
     return success;
@@ -1196,7 +1196,7 @@ void start_emulation(uint64_t startAddress) {
             else {
                 std::wcout << L"[!] Instruction not implemented: "
                     << std::wstring(instrText.begin(), instrText.end()) << std::endl;
-                DebugBreak();
+                exit(0);
             }
 
 
