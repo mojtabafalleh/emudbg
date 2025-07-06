@@ -21,7 +21,7 @@ IMAGE_OPTIONAL_HEADER64 optionalHeader;
  BYTE lastOrigByte = 0;
  PROCESS_INFORMATION pi;
 
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
@@ -1240,12 +1240,13 @@ void start_emulation(uint64_t startAddress) {
             instr = op->info;
 
             std::string instrText = disasm.InstructionText();
-            std::wcout << L"0x" << std::hex << disasm.Address()
-                << L": " << std::wstring(instrText.begin(), instrText.end()) << std::endl;
+            LOG( L"0x" << std::hex << disasm.Address()
+                << L": " << std::wstring(instrText.begin(), instrText.end()) );
+
 
             bool has_lock = (instr.attributes & ZYDIS_ATTRIB_HAS_LOCK) != 0;
             if (has_lock) {
-                std::wcout << L"[~] LOCK prefix detected." << std::endl;
+                LOG(L"[~] LOCK prefix detected.");
             }
 
             auto it = dispatch_table.find(instr.mnemonic);
@@ -1491,7 +1492,14 @@ void GetModuleRange(DWORD pid, const std::wstring& moduleName) {
     CloseHandle(hSnap);
 }
 // ------------------- Main -------------------
-int main() {
+int wmain(int argc, wchar_t* argv[]) {
+    if (argc < 2) {
+        wprintf(L"Usage: %s <path_to_exe>\n", argv[0]);
+        return 1;
+    }
+
+    std::wstring exePath = argv[1];
+
     dispatch_table = {
         { ZYDIS_MNEMONIC_MOV, emulate_mov },
         { ZYDIS_MNEMONIC_ADD, emulate_add },
@@ -1538,8 +1546,6 @@ int main() {
     };
 
     STARTUPINFOW si = { sizeof(si) };
-
-    std::wstring exePath = L"D:\\Project\\emulator\\binary\\helloworld.exe";
     uint32_t entryRVA = GetEntryPointRVA(exePath);
     auto tlsRVAs = GetTLSCallbackRVAs(exePath);
     if (!CreateProcessW(exePath.c_str(), NULL, NULL, NULL, FALSE, DEBUG_ONLY_THIS_PROCESS, NULL, NULL, &si, &pi)) return 1;
