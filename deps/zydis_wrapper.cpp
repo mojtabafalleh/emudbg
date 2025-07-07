@@ -602,9 +602,9 @@ const char* Zydis::MemSizeName(size_t size) const
 
 uint64_t Zydis::BranchDestination() const
 {
-    if(!Success()
-            || mInstr.operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE
-            /*|| !mInstr.operands[0].imm.isRelative HACKED*/)
+    if (!Success()
+        || mInstr.operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE
+        /*|| !mInstr.operands[0].imm.isRelative HACKED*/)
         return 0;
 
     return uint64_t(mInstr.operands[0].imm.value.u);
