@@ -354,6 +354,14 @@ T get_register_value(ZydisRegister reg) {
     return (it != reg_lookup.end()) ? *reinterpret_cast<T*>(it->second) : 0;
 }
 template<>
+__m128 get_register_value<__m128>(ZydisRegister reg) {
+    auto it = reg_lookup.find(reg);
+    if (it != reg_lookup.end()) {
+        return *reinterpret_cast<__m128*>(it->second);
+    }
+    return _mm_setzero_ps(); // یا هر مقدار پیش‌فرض دیگر
+}
+template<>
 __m128i get_register_value<__m128i>(ZydisRegister reg) {
     auto it = reg_lookup.find(reg);
     if (it != reg_lookup.end())
@@ -378,9 +386,35 @@ uint8_t* get_register_value<uint8_t*>(ZydisRegister reg) {
         return nullptr;
 }
 template<typename T>
+
+
 void set_register_value(ZydisRegister reg, T value) {
     auto it = reg_lookup.find(reg);
     if (it != reg_lookup.end()) *reinterpret_cast<T*>(it->second) = value;
+}
+
+template<>
+void set_register_value<__m128i>(ZydisRegister reg, __m128i value) {
+    auto it = reg_lookup.find(reg);
+    if (it != reg_lookup.end()) {
+        *reinterpret_cast<__m128i*>(it->second) = value;
+    }
+}
+
+template<>
+void set_register_value<__m128>(ZydisRegister reg, __m128 value) {
+    auto it = reg_lookup.find(reg);
+    if (it != reg_lookup.end()) {
+        *reinterpret_cast<__m128*>(it->second) = value;
+    }
+}
+
+template<>
+void set_register_value<__m256i>(ZydisRegister reg, __m256i value) {
+    auto it = reg_lookup.find(reg);
+    if (it != reg_lookup.end()) {
+        *reinterpret_cast<__m256i*>(it->second) = value;
+    }
 }
 
 void DumpRegisters() {
@@ -697,7 +731,74 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
     }
 }
 
+void emulate_movdqu(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
 
+    __m128i value;
+
+
+    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        value = get_register_value<__m128i>(src.reg.value);
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        if (!ReadEffectiveMemory(src, &value)) {
+            LOG(L"[!] Failed to read memory in movdqu");
+            return;
+        }
+    }
+    else {
+        LOG(L"[!] Unsupported source operand type in movdqu");
+        return;
+    }
+
+
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        set_register_value<__m128i>(dst.reg.value, value);
+    }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        if (!WriteEffectiveMemory(dst, value)) {
+            LOG(L"[!] Failed to write memory in movdqu");
+            return;
+        }
+    }
+    else {
+        LOG(L"[!] Unsupported destination operand type in movdqu");
+        return;
+    }
+
+    LOG(L"[+] MOVDQU executed");
+}
+
+void emulate_xorps(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+
+    __m128 dst_val = get_register_value<__m128>(dst.reg.value);
+    __m128 src_val;
+
+    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        src_val = get_register_value<__m128>(src.reg.value);
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        if (!ReadEffectiveMemory(src, &src_val)) {
+            LOG(L"[!] Failed to read memory in xorps");
+            return;
+        }
+    }
+    else {
+        LOG(L"[!] Unsupported source operand type in xorps");
+        return;
+    }
+
+
+    __m128 result = _mm_xor_ps(dst_val, src_val);
+
+
+    set_register_value<__m128>(dst.reg.value, result);
+
+    LOG(L"[+] XORPS executed");
+}
 
 void emulate_xor(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
@@ -707,6 +808,41 @@ void emulate_xor(const ZydisDisassembledInstruction* instr) {
     set_register_value<uint64_t>(dst.reg.value, result);
     LOG(L"[+] XOR => 0x" << std::hex << result);
 }
+
+void emulate_sbb(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+
+    if (dst.type != ZYDIS_OPERAND_TYPE_REGISTER || src.type != ZYDIS_OPERAND_TYPE_REGISTER) {
+        LOG(L"[!] Unsupported operand types in SBB");
+        return;
+    }
+
+    uint32_t dst_val = get_register_value<uint32_t>(dst.reg.value);
+    uint32_t src_val = get_register_value<uint32_t>(src.reg.value);
+
+    uint64_t result64 = static_cast<uint64_t>(dst_val) - static_cast<uint64_t>(src_val) - (g_regs.rflags.flags.CF ? 1 : 0);
+    uint32_t result = static_cast<uint32_t>(result64);
+
+
+    set_register_value<uint32_t>(dst.reg.value, result);
+
+  
+
+    g_regs.rflags.flags.CF = (result64 >> 32) & 1;          // Carry flag (Borrow)
+    g_regs.rflags.flags.ZF = (result == 0);                 // Zero flag
+    g_regs.rflags.flags.SF = (result & 0x80000000) != 0;    // Sign flag (بیت علامت)
+    g_regs.rflags.flags.PF = parity(result & 0xFF); // Parity flag (مثلاً با GCC)
+
+    bool dst_sign = (dst_val & 0x80000000) != 0;
+    bool src_sign = (src_val & 0x80000000) != 0;
+    bool res_sign = (result & 0x80000000) != 0;
+
+    g_regs.rflags.flags.OF = (dst_sign != src_sign) && (dst_sign != res_sign);
+
+
+}
+
 
 void emulate_and(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -1533,6 +1669,84 @@ void emulate_jle(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] JLE to => 0x" << std::hex << g_regs.rip);
 }
 
+void emulate_movups(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+
+    __m128i value;
+
+    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        value = get_register_value<__m128i>(src.reg.value);
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        if (!ReadEffectiveMemory(src, &value)) {
+            LOG(L"[!] Failed to read memory in movups");
+            return;
+        }
+    }
+    else {
+        LOG(L"[!] Unsupported source operand type in movups");
+        return;
+    }
+
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        set_register_value<__m128i>(dst.reg.value, value);
+    }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        if (!WriteEffectiveMemory(dst, value)) {
+            LOG(L"[!] Failed to write memory in movups");
+            return;
+        }
+    }
+    else {
+        LOG(L"[!] Unsupported destination operand type in movups");
+        return;
+    }
+
+    LOG(L"[+] MOVUPS executed");
+}
+
+void emulate_stosw(const ZydisDisassembledInstruction* instr) {
+
+    uint64_t count = 0;
+    if (instr->info.operand_width == 16)
+        count = g_regs.rcx.w;  // CX
+    else if (instr->info.operand_width == 32)
+        count = g_regs.rcx.d;  // ECX
+    else 
+        count = g_regs.rcx.q;  // RCX
+
+    uint16_t value = g_regs.rax.w;  // AX
+
+
+    uint64_t dest = g_regs.rdi.q;
+
+
+    int delta = g_regs.rflags.flags.DF ? -2 : 2;
+
+    for (uint64_t i = 0; i < count; i++) {
+
+        if (!WriteMemory(dest, &value,16)) {
+            LOG(L"[!] Failed to write memory in rep stosw");
+            break;
+        }
+
+        dest += delta;
+    }
+
+
+    g_regs.rdi.q = dest;
+
+
+    if (instr->info.operand_width == 16)
+        g_regs.rcx.w = 0;
+    else if (instr->info.operand_width == 32)
+        g_regs.rcx.d = 0;
+    else
+        g_regs.rcx.q = 0;
+}
+
+
 void emulate_punpcklqdq(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
@@ -1634,6 +1848,74 @@ void emulate_movq(const ZydisDisassembledInstruction* instr) {
     }
     else {
         LOG(L"[!] Unsupported movq operands");
+    }
+}
+
+void emulate_cmovb(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+
+    if (!g_regs.rflags.flags.CF) {
+
+        return;
+    }
+
+
+
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        
+            uint64_t value = get_register_value<uint64_t>(src.reg.value);
+            set_register_value<uint64_t>(dst.reg.value, value);
+        }
+        else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        
+            if (instr->info.operand_width == 64) {
+                uint64_t value;
+                if (ReadEffectiveMemory(src, &value)) {
+                    set_register_value<uint64_t>(dst.reg.value, value);
+                }
+                else {
+                    LOG(L"[!] Failed to read memory in cmovb");
+                }
+            }
+            else if (instr->info.operand_width == 32) {
+                uint32_t value;
+                if (ReadEffectiveMemory(src, &value)) {
+                    set_register_value<uint32_t>(dst.reg.value, value);
+                    set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(value)); // zero-extend
+                }
+                else {
+                    LOG(L"[!] Failed to read memory in cmovb");
+                }
+            }
+            else if (instr->info.operand_width == 16) {
+                uint16_t value;
+                if (ReadEffectiveMemory(src, &value)) {
+                    set_register_value<uint16_t>(dst.reg.value, value);
+                    set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(value));
+                }
+                else {
+                    LOG(L"[!] Failed to read memory in cmovb");
+                }
+            }
+            else if (instr->info.operand_width == 8) {
+                uint8_t value;
+                if (ReadEffectiveMemory(src, &value)) {
+                    set_register_value<uint8_t>(dst.reg.value, value);
+                    set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(value));
+                }
+                else {
+                    LOG(L"[!] Failed to read memory in cmovb");
+                }
+            }
+        }
+        else {
+            LOG(L"[!] Unsupported source operand type in cmovb");
+        }
+    }
+    else {
+        LOG(L"[!] Unsupported destination operand type in cmovb");
     }
 }
 
@@ -2179,6 +2461,10 @@ void start_emulation(uint64_t startAddress) {
             if (has_lock) {
                 LOG(L"[~] LOCK prefix detected.");
             }
+            bool has_rep = (instr.attributes & ZYDIS_ATTRIB_HAS_REP) != 0;
+            if (has_rep) {
+                LOG(L"[~] REP prefix detected.");
+            }
             bool has_VEX = (instr.attributes & ZYDIS_ATTRIB_HAS_VEX) != 0;
             if (has_VEX) {
                 LOG(L"[~] VEX prefix detected.");
@@ -2531,8 +2817,13 @@ int wmain(int argc, wchar_t* argv[]) {
         { ZYDIS_MNEMONIC_VINSERTF128, emulate_vinsertf128 },
         { ZYDIS_MNEMONIC_VMOVDQU, emulate_vmovdqu },
         { ZYDIS_MNEMONIC_VZEROUPPER, emulate_vzeroupper },
-        
-    };
+        { ZYDIS_MNEMONIC_MOVUPS, emulate_movups },
+        { ZYDIS_MNEMONIC_MOVDQU, emulate_movdqu },
+        { ZYDIS_MNEMONIC_XORPS, emulate_xorps },
+        { ZYDIS_MNEMONIC_STOSW, emulate_stosw },
+        { ZYDIS_MNEMONIC_SBB, emulate_sbb },
+        { ZYDIS_MNEMONIC_CMOVB, emulate_cmovb },
+    }; 
     
     STARTUPINFOW si = { sizeof(si) };
     uint32_t entryRVA = GetEntryPointRVA(exePath);
