@@ -59,8 +59,7 @@ extern "C" NTSTATUS NTAPI NtQueryInformationThread(
 
 HANDLE hProcess;
 
-extern "C" void __cdecl xgetbv_asm(uint32_t ecx, uint32_t* out_eax, uint32_t* out_edx);
-
+extern "C" uint64_t __cdecl xgetbv_asm(uint32_t ecx);
 
 template<typename T>
 T get_register_value(ZydisRegister reg);
@@ -428,11 +427,140 @@ void emulate_xor(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_and(const ZydisDisassembledInstruction* instr) {
-    const auto& dst = instr->operands[0], src = instr->operands[1];
-    uint64_t lhs = get_register_value<uint64_t>(dst.reg.value);
-    uint64_t rhs = get_register_value<uint64_t>(src.reg.value);
-    uint64_t result = lhs & rhs;
-    set_register_value<uint64_t>(dst.reg.value, result);
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+
+    uint64_t lhs = 0, rhs = 0, result = 0;
+
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        lhs = get_register_value<uint64_t>(dst.reg.value);
+        rhs = get_register_value<uint64_t>(src.reg.value);
+        result = lhs & rhs;
+        set_register_value<uint64_t>(dst.reg.value, result);
+    }
+
+    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        lhs = get_register_value<uint64_t>(dst.reg.value);
+
+        if (instr->info.operand_width == 64) {
+            uint64_t value;
+            if (ReadEffectiveMemory(src, &value)) {
+                rhs = value;
+                result = lhs & rhs;
+                set_register_value<uint64_t>(dst.reg.value, result);
+            }
+        }
+        else if (instr->info.operand_width == 32) {
+            uint32_t value;
+            if (ReadEffectiveMemory(src, &value)) {
+                rhs = static_cast<uint64_t>(value);
+                result = lhs & rhs;
+                set_register_value<uint64_t>(dst.reg.value, result);
+            }
+        }
+        else if (instr->info.operand_width == 16) {
+            uint16_t value;
+            if (ReadEffectiveMemory(src, &value)) {
+                rhs = static_cast<uint64_t>(value);
+                result = lhs & rhs;
+                set_register_value<uint64_t>(dst.reg.value, result);
+            }
+        }
+        else if (instr->info.operand_width == 8) {
+            uint8_t value;
+            if (ReadEffectiveMemory(src, &value)) {
+                rhs = static_cast<uint64_t>(value);
+                result = lhs & rhs;
+                set_register_value<uint64_t>(dst.reg.value, result);
+            }
+        }
+    }
+
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        rhs = get_register_value<uint64_t>(src.reg.value);
+
+        if (instr->info.operand_width == 64) {
+            uint64_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                lhs = value;
+                result = lhs & rhs;
+                WriteEffectiveMemory(dst, result);
+            }
+        }
+        else if (instr->info.operand_width == 32) {
+            uint32_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                lhs = static_cast<uint64_t>(value);
+                result = lhs & rhs;
+                WriteEffectiveMemory(dst, static_cast<uint32_t>(result));
+            }
+        }
+        else if (instr->info.operand_width == 16) {
+            uint16_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                lhs = static_cast<uint64_t>(value);
+                result = lhs & rhs;
+                WriteEffectiveMemory(dst, static_cast<uint16_t>(result));
+            }
+        }
+        else if (instr->info.operand_width == 8) {
+            uint8_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                lhs = static_cast<uint64_t>(value);
+                result = lhs & rhs;
+                WriteEffectiveMemory(dst, static_cast<uint8_t>(result));
+            }
+        }
+    }
+
+    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        lhs = get_register_value<uint64_t>(dst.reg.value);
+        rhs = static_cast<uint64_t>(src.imm.value.u);
+        result = lhs & rhs;
+        set_register_value<uint64_t>(dst.reg.value, result);
+    }
+
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        rhs = static_cast<uint64_t>(src.imm.value.u);
+
+        if (instr->info.operand_width == 64) {
+            uint64_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                lhs = value;
+                result = lhs & rhs;
+                WriteEffectiveMemory(dst, result);
+            }
+        }
+        else if (instr->info.operand_width == 32) {
+            uint32_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                lhs = static_cast<uint64_t>(value);
+                result = lhs & rhs;
+                WriteEffectiveMemory(dst, static_cast<uint32_t>(result));
+            }
+        }
+        else if (instr->info.operand_width == 16) {
+            uint16_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                lhs = static_cast<uint64_t>(value);
+                result = lhs & rhs;
+                WriteEffectiveMemory(dst, static_cast<uint16_t>(result));
+            }
+        }
+        else if (instr->info.operand_width == 8) {
+            uint8_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                lhs = static_cast<uint64_t>(value);
+                result = lhs & rhs;
+                WriteEffectiveMemory(dst, static_cast<uint8_t>(result));
+            }
+        }
+    }
+
+    else {
+        LOG(L"[!] Unsupported AND instruction");
+    }
+
     LOG(L"[+] AND => 0x" << std::hex << result);
 }
 
@@ -919,16 +1047,15 @@ void emulate_jnb(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_xgetbv(const ZydisDisassembledInstruction*) {
-    uint32_t ecx = static_cast<uint32_t>(g_regs.rcx.q);
 
-    uint32_t eax = 0, edx = 0;
-    xgetbv_asm(ecx, &eax, &edx);
+    uint64_t XCR ;
+    XCR = xgetbv_asm(g_regs.rcx.d);
 
-    g_regs.rax.q = eax;
-    g_regs.rdx.q = edx;
+    g_regs.rax.q = XCR & 0xFFFFFFFF;           
+    g_regs.rdx.q = (XCR >> 32) & 0xFFFFFFFF;   
 
-    LOG(L"[+] XGETBV => ECX=0x" << std::hex << ecx
-        << L", RAX=0x" << eax << L", RDX=0x" << edx);
+    LOG(L"[+] XGETBV => ECX=0x" << std::hex << g_regs.rcx.q
+        << L", RAX=0x" << g_regs.rax.q << L", RDX=0x" << g_regs.rdx.q);
 }
 
 void emulate_cmovz(const ZydisDisassembledInstruction* instr) {
