@@ -19,7 +19,7 @@ uint64_t lastBreakpointAddr = 0;
 BYTE lastOrigByte = 0;
 PROCESS_INFORMATION pi;
 
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
@@ -2678,13 +2678,13 @@ void emulate_movzx(const ZydisDisassembledInstruction* instr) {
     const auto& src = instr->operands[1];
 
     if (dst.type != ZYDIS_OPERAND_TYPE_REGISTER) {
-        std::wcerr << L"[!] MOVZX destination must be a register" << std::endl;
+        LOG(L"[!] MOVZX destination must be a register");
         exit(0);
     }
 
     uint8_t src_size_bytes = static_cast<uint8_t>(src.size / 8);
     if (src_size_bytes == 0 || src_size_bytes > 4) {
-        std::wcerr << L"[!] Unsupported register size for MOVZX: " << src.size << std::endl;
+        LOG(L"[!] Unsupported register size for MOVZX: " << src.size);
         exit(0);
     }
 
@@ -2704,7 +2704,7 @@ void emulate_movzx(const ZydisDisassembledInstruction* instr) {
             zero_extended_value = static_cast<uint32_t>(reg_val);
             break;
         default:
-            std::wcerr << L"[!] Unsupported register size for MOVZX: " << src.size << std::endl;
+            LOG(L"[!] Unsupported register size for MOVZX: " << src.size);
             exit(0);
         }
     }
@@ -2713,7 +2713,8 @@ void emulate_movzx(const ZydisDisassembledInstruction* instr) {
         case 1: {
             uint8_t val;
             if (!ReadEffectiveMemory(src, &val)) {
-                std::wcerr << L"[!] Failed to read memory for MOVZX (byte)" << std::endl;
+
+                LOG(L"[!] Failed to read memory for MOVZX (byte)");
                 exit(0);
             }
             zero_extended_value = val;
@@ -2722,7 +2723,7 @@ void emulate_movzx(const ZydisDisassembledInstruction* instr) {
         case 2: {
             uint16_t val;
             if (!ReadEffectiveMemory(src, &val)) {
-                std::wcerr << L"[!] Failed to read memory for MOVZX (word)" << std::endl;
+                LOG(L"[!] Failed to read memory for MOVZX (word)");
                 exit(0);
             }
             zero_extended_value = val;
@@ -2731,19 +2732,19 @@ void emulate_movzx(const ZydisDisassembledInstruction* instr) {
         case 4: {
             uint32_t val;
             if (!ReadEffectiveMemory(src, &val)) {
-                std::wcerr << L"[!] Failed to read memory for MOVZX (dword)" << std::endl;
+                LOG(L"[!] Failed to read memory for MOVZX (dword)" );
                 exit(0);
             }
             zero_extended_value = val;
             break;
         }
         default:
-            std::wcerr << L"[!] Unsupported memory size for MOVZX: " << src.size << std::endl;
+            LOG(L"[!] Unsupported memory size for MOVZX: " << src.size);
             exit(0);
         }
     }
     else {
-        std::wcerr << L"[!] Unsupported source operand type for MOVZX" << std::endl;
+        LOG(L"[!] Unsupported source operand type for MOVZX");
         exit(0);
     }
 
@@ -2759,12 +2760,12 @@ void emulate_movzx(const ZydisDisassembledInstruction* instr) {
         set_register_value<uint16_t>(dst.reg.value, static_cast<uint16_t>(zero_extended_value));
         break;
     default:
-        std::wcerr << L"[!] Unsupported MOVZX destination width: " << instr->info.operand_width << std::endl;
+        LOG(L"[!] Unsupported MOVZX destination width: " << instr->info.operand_width);
         exit(0);
     }
+    LOG(L"[+] MOVZX => zero-extended 0x" << std::hex << zero_extended_value
+        << L" into " << ZydisRegisterGetString(dst.reg.value));
 
-    std::wcout << L"[+] MOVZX => zero-extended 0x" << std::hex << zero_extended_value
-        << L" into " << ZydisRegisterGetString(dst.reg.value) << std::endl;
 }
 
 
