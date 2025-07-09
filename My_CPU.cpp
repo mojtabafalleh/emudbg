@@ -19,7 +19,7 @@ uint64_t lastBreakpointAddr = 0;
 BYTE lastOrigByte = 0;
 PROCESS_INFORMATION pi;
 
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
@@ -1143,55 +1143,53 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-    int64_t extended_value = 0;
+    int64_t value = 0;
 
-
-    if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
         if (src.size == 1) {
-            int8_t value;
-            if (!ReadEffectiveMemory(src, &value)) {
-                LOG(L"[!] Failed to read memory for MOVSX (byte)");
-                return;
-            }
-            extended_value = static_cast<int64_t>(value);
+            int8_t v = static_cast<int8_t>(get_register_value<uint8_t>(src.reg.value));
+            value = static_cast<int64_t>(v);
         }
         else if (src.size == 2) {
-            int16_t value;
-            if (!ReadEffectiveMemory(src, &value)) {
-                LOG(L"[!] Failed to read memory for MOVSX (word)");
-                return;
-            }
-            extended_value = static_cast<int64_t>(value);
+            int16_t v = static_cast<int16_t>(get_register_value<uint16_t>(src.reg.value));
+            value = static_cast<int64_t>(v);
         }
         else if (src.size == 4) {
-            int32_t value;
-            if (!ReadEffectiveMemory(src, &value)) {
-                LOG(L"[!] Failed to read memory for MOVSX (dword)");
-                return;
-            }
-            extended_value = static_cast<int64_t>(value);
-        }
-        else {
-            LOG(L"[!] Unsupported MOVSX memory source size: " << src.size);
-            return;
-        }
-    }
-
-    else if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        if (src.size == 1) {
-            int8_t value = static_cast<int8_t>(get_register_value<uint8_t>(src.reg.value));
-            extended_value = static_cast<int64_t>(value);
-        }
-        else if (src.size == 2) {
-            int16_t value = static_cast<int16_t>(get_register_value<uint16_t>(src.reg.value));
-            extended_value = static_cast<int64_t>(value);
-        }
-        else if (src.size == 4) {
-            int32_t value = static_cast<int32_t>(get_register_value<uint32_t>(src.reg.value));
-            extended_value = static_cast<int64_t>(value);
+            int32_t v = static_cast<int32_t>(get_register_value<uint32_t>(src.reg.value));
+            value = static_cast<int64_t>(v);
         }
         else {
             LOG(L"[!] Unsupported MOVSX register source size: " << src.size);
+            return;
+        }
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        if (src.size == 1) {
+            int8_t v;
+            if (!ReadEffectiveMemory(src, &v)) {
+                LOG(L"[!] Failed to read memory for MOVSX (byte)");
+                return;
+            }
+            value = static_cast<int64_t>(v);
+        }
+        else if (src.size == 2) {
+            int16_t v;
+            if (!ReadEffectiveMemory(src, &v)) {
+                LOG(L"[!] Failed to read memory for MOVSX (word)");
+                return;
+            }
+            value = static_cast<int64_t>(v);
+        }
+        else if (src.size == 4) {
+            int32_t v;
+            if (!ReadEffectiveMemory(src, &v)) {
+                LOG(L"[!] Failed to read memory for MOVSX (dword)");
+                return;
+            }
+            value = static_cast<int64_t>(v);
+        }
+        else {
+            LOG(L"[!] Unsupported MOVSX memory source size: " << src.size);
             return;
         }
     }
@@ -1200,23 +1198,25 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-
     if (instr->info.operand_width == 64) {
-        set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(extended_value));
+        set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(value));
     }
     else if (instr->info.operand_width == 32) {
-        set_register_value<uint32_t>(dst.reg.value, static_cast<uint32_t>(extended_value));
-        set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(static_cast<uint32_t>(extended_value)));  // zero-extend
+        uint32_t val32 = static_cast<uint32_t>(value);
+        set_register_value<uint32_t>(dst.reg.value, val32);
+        set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(val32)); // zero-extend for upper bits
     }
     else if (instr->info.operand_width == 16) {
-        set_register_value<uint16_t>(dst.reg.value, static_cast<uint16_t>(extended_value));
+        set_register_value<uint16_t>(dst.reg.value, static_cast<uint16_t>(value));
     }
     else {
         LOG(L"[!] Unsupported MOVSX destination width: " << instr->info.operand_width);
         return;
     }
 
-    LOG(L"[+] MOVSX => sign-extended 0x" << std::hex << extended_value << L" to " << ZydisRegisterGetString(dst.reg.value));
+    LOG(L"[+] MOVSX sign-extended to " << instr->info.operand_width
+        << L" bits: 0x" << std::hex << value << L" -> "
+        << ZydisRegisterGetString(dst.reg.value));
 }
 
 
