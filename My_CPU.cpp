@@ -2677,51 +2677,98 @@ void emulate_movzx(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
 
-
-    if (src.type != ZYDIS_OPERAND_TYPE_REGISTER || dst.type != ZYDIS_OPERAND_TYPE_REGISTER) {
-        LOG(L"[!] Unsupported operand type for MOVZX");
-        return;
+    if (dst.type != ZYDIS_OPERAND_TYPE_REGISTER) {
+        std::wcerr << L"[!] MOVZX destination must be a register" << std::endl;
+        exit(0);
     }
 
-    uint64_t src_size = instr->operands[1].size;
-    uint64_t dst_size = instr->operands[0].size;
+    uint8_t src_size_bytes = static_cast<uint8_t>(src.size / 8);
+    if (src_size_bytes == 0 || src_size_bytes > 4) {
+        std::wcerr << L"[!] Unsupported register size for MOVZX: " << src.size << std::endl;
+        exit(0);
+    }
 
-    if ((src_size == 8 && dst_size == 16) ||
-        (src_size == 8 && dst_size == 32) ||
-        (src_size == 8 && dst_size == 64) ||
-        (src_size == 16 && dst_size == 32) ||
-        (src_size == 16 && dst_size == 64) ||
-        (src_size == 32 && dst_size == 64)) {
+    uint64_t zero_extended_value = 0;
 
-        uint64_t src_value = get_register_value<uint64_t>(src.reg.value);
+    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        uint64_t reg_val = get_register_value<uint64_t>(src.reg.value);
 
-        switch (src_size) {
-        case 8: {
-            uint8_t val = static_cast<uint8_t>(src_value);
-            set_register_value<uint64_t>(dst.reg.value, val);
+        switch (src_size_bytes) {
+        case 1:
+            zero_extended_value = static_cast<uint8_t>(reg_val);
+            break;
+        case 2:
+            zero_extended_value = static_cast<uint16_t>(reg_val);
+            break;
+        case 4:
+            zero_extended_value = static_cast<uint32_t>(reg_val);
+            break;
+        default:
+            std::wcerr << L"[!] Unsupported register size for MOVZX: " << src.size << std::endl;
+            exit(0);
+        }
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        switch (src_size_bytes) {
+        case 1: {
+            uint8_t val;
+            if (!ReadEffectiveMemory(src, &val)) {
+                std::wcerr << L"[!] Failed to read memory for MOVZX (byte)" << std::endl;
+                exit(0);
+            }
+            zero_extended_value = val;
             break;
         }
-        case 16: {
-            uint16_t val = static_cast<uint16_t>(src_value);
-            set_register_value<uint64_t>(dst.reg.value, val);
+        case 2: {
+            uint16_t val;
+            if (!ReadEffectiveMemory(src, &val)) {
+                std::wcerr << L"[!] Failed to read memory for MOVZX (word)" << std::endl;
+                exit(0);
+            }
+            zero_extended_value = val;
             break;
         }
-        case 32: {
-            uint32_t val = static_cast<uint32_t>(src_value);
-            set_register_value<uint64_t>(dst.reg.value, val);
+        case 4: {
+            uint32_t val;
+            if (!ReadEffectiveMemory(src, &val)) {
+                std::wcerr << L"[!] Failed to read memory for MOVZX (dword)" << std::endl;
+                exit(0);
+            }
+            zero_extended_value = val;
             break;
         }
         default:
-            LOG(L"[!] Invalid source size for MOVZX");
-            return;
+            std::wcerr << L"[!] Unsupported memory size for MOVZX: " << src.size << std::endl;
+            exit(0);
         }
-
-        LOG(L"[+] MOVZX => R" << dst.reg.value << L" = 0x" << std::hex << get_register_value<uint64_t>(dst.reg.value));
     }
     else {
-        LOG(L"[!] Unsupported operand width for MOVZX");
+        std::wcerr << L"[!] Unsupported source operand type for MOVZX" << std::endl;
+        exit(0);
     }
+
+    switch (instr->info.operand_width) {
+    case 64:
+        set_register_value<uint64_t>(dst.reg.value, zero_extended_value);
+        break;
+    case 32:
+        set_register_value<uint32_t>(dst.reg.value, static_cast<uint32_t>(zero_extended_value));
+        set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(zero_extended_value));
+        break;
+    case 16:
+        set_register_value<uint16_t>(dst.reg.value, static_cast<uint16_t>(zero_extended_value));
+        break;
+    default:
+        std::wcerr << L"[!] Unsupported MOVZX destination width: " << instr->info.operand_width << std::endl;
+        exit(0);
+    }
+
+    std::wcout << L"[+] MOVZX => zero-extended 0x" << std::hex << zero_extended_value
+        << L" into " << ZydisRegisterGetString(dst.reg.value) << std::endl;
 }
+
+
+
 
 void emulate_jb(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
