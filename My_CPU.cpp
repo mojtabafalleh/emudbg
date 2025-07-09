@@ -164,7 +164,7 @@ bool AccessEffectiveMemory(const ZydisDecodedOperand& op, T* inout, bool write) 
         // Handle RIP-relative addressing
         if (op.mem.base == ZYDIS_REGISTER_RIP) {
             address = g_regs.rip + instr.length;
-            LOG(L"[+] RIP-relative base : " << std::hex << address);
+          //  LOG(L"[+] RIP-relative base : " << std::hex << address);
         }
         else if (op.mem.base != ZYDIS_REGISTER_NONE) {
             address = get_register_value<uint64_t>(op.mem.base);
@@ -926,12 +926,77 @@ void emulate_xorps(const ZydisDisassembledInstruction* instr) {
 
 void emulate_xor(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
-    uint64_t lhs = get_register_value<uint64_t>(dst.reg.value);
-    uint64_t rhs = get_register_value<uint64_t>(src.reg.value);
-    uint64_t result = lhs ^ rhs;
-    set_register_value<uint64_t>(dst.reg.value, result);
+    uint64_t result = 0;
+
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        uint64_t lhs = get_register_value<uint64_t>(dst.reg.value);
+        uint64_t rhs = get_register_value<uint64_t>(src.reg.value);
+        result = lhs ^ rhs;
+        set_register_value<uint64_t>(dst.reg.value, result);
+    }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        uint64_t lhs = get_register_value<uint64_t>(dst.reg.value);
+        uint64_t rhs = src.imm.value.u;
+        result = lhs ^ rhs;
+        set_register_value<uint64_t>(dst.reg.value, result);
+    }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        uint64_t lhs = get_register_value<uint64_t>(dst.reg.value);
+        uint64_t rhs = 0;
+
+        if (ReadEffectiveMemory(src, &rhs)) {
+            result = lhs ^ rhs;
+            set_register_value<uint64_t>(dst.reg.value, result);
+        }
+        else {
+            LOG(L"[!] Failed to read memory in XOR");
+            return;
+        }
+    }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        uint64_t mem_value = 0;
+        if (!ReadEffectiveMemory(dst, &mem_value)) {
+            LOG(L"[!] Failed to read memory in XOR");
+            return;
+        }
+        uint64_t reg_value = get_register_value<uint64_t>(src.reg.value);
+        result = mem_value ^ reg_value;
+        WriteEffectiveMemory(dst, result);
+    }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        uint64_t mem_value = 0;
+        if (!ReadEffectiveMemory(dst, &mem_value)) {
+            LOG(L"[!] Failed to read memory in XOR");
+            return;
+        }
+        uint64_t imm_value = src.imm.value.u;
+        result = mem_value ^ imm_value;
+        WriteEffectiveMemory(dst, result);
+    }
+    else {
+        LOG(L"[!] Unsupported XOR instruction");
+        return;
+    }
+
     LOG(L"[+] XOR => 0x" << std::hex << result);
 }
+
+void emulate_cdqe(const ZydisDisassembledInstruction* instr) {
+
+    g_regs.rax.q = static_cast<int64_t>(static_cast<int32_t>(g_regs.rax.d));
+
+    LOG(L"[+] CDQE => Sign-extended EAX (0x" << std::hex << g_regs.rax.d << L") to RAX = 0x" << g_regs.rax.q);
+}
+
+void emulate_stosq(const ZydisDisassembledInstruction* instr) {
+
+    WriteMemory(g_regs.rdi.q, &g_regs.rax.q, sizeof(uint64_t));
+
+    g_regs.rdi.q = g_regs.rflags.flags.DF ? (g_regs.rdi.q - 8) : (g_regs.rdi.q + 8);
+
+    LOG(L"[+] STOSQ => Wrote 0x" << std::hex << g_regs.rax.q << L" to [RDI], new RDI = 0x" << g_regs.rdi.q);
+}
+
 
 void emulate_sbb(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -1942,7 +2007,6 @@ void emulate_inc(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_jz(const ZydisDisassembledInstruction* instr) {
-    LOG(L"ZF flag: " << g_regs.rflags.flags.ZF);
     const auto& op = instr->operands[0];
     if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
         if (g_regs.rflags.flags.ZF == 1) {
@@ -3249,7 +3313,9 @@ int wmain(int argc, wchar_t* argv[]) {
         { ZYDIS_MNEMONIC_CMOVNZ, emulate_cmovnz },
         { ZYDIS_MNEMONIC_XADD, emulate_xadd },
         { ZYDIS_MNEMONIC_CMOVNBE, emulate_cmovnbe },
-
+        { ZYDIS_MNEMONIC_STOSQ, emulate_stosq },
+        { ZYDIS_MNEMONIC_CDQE, emulate_cdqe },
+        
     };
 
     STARTUPINFOW si = { sizeof(si) };
