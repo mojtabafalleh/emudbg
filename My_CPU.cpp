@@ -507,6 +507,31 @@ void update_flags_add(uint64_t result, uint64_t val_dst, uint64_t val_src, int s
     g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
 }
 
+void update_flags_and(uint64_t result, uint64_t val_dst, uint64_t val_src, int size_bits) {
+    uint64_t mask = (size_bits == 64) ? ~0ULL : ((1ULL << size_bits) - 1);
+    result &= mask; val_dst &= mask; val_src &= mask;
+
+    // Zero Flag (ZF)
+    g_regs.rflags.flags.ZF = (result == 0);
+
+    // Sign Flag (SF)
+    g_regs.rflags.flags.SF = (result >> (size_bits - 1)) & 1;
+
+    // Parity Flag (PF)
+    // Count the number of 1s in the least significant byte
+    g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
+
+    // Auxiliary Carry Flag (AF) - not relevant for AND but you can set it to 0 if needed
+    g_regs.rflags.flags.AF = 0;
+
+    // Carry Flag (CF) - for AND operation, CF is always 0
+    g_regs.rflags.flags.CF = 0;
+
+    // Overflow Flag (OF) - for AND operation, OF is always 0
+    g_regs.rflags.flags.OF = 0;
+}
+
+
 // ----------------------- Break point helper ------------------
 
 bool SetBreakpoint(HANDLE hProcess, uint64_t address, BYTE& originalByte) {
@@ -708,7 +733,7 @@ void emulate_mul(const ZydisDisassembledInstruction* instr) {
 
 void emulate_imul(const ZydisDisassembledInstruction* instr) {
     const auto& operands = instr->operands;
-    int operand_count = instr->info.operand_count -1 ;
+    int operand_count = instr->info.operand_count - 1;
     int width = instr->info.operand_width; // 8, 16, 32, 64
 
     auto read_operand = [&](const ZydisDecodedOperand& op) -> int64_t {
@@ -903,8 +928,8 @@ void emulate_movdqu(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_xadd(const ZydisDisassembledInstruction* instr) {
-    const auto& dst = instr->operands[0]; 
-    const auto& src = instr->operands[1]; 
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
     const int width = instr->info.operand_width;
 
     if (src.type != ZYDIS_OPERAND_TYPE_REGISTER) {
@@ -1033,7 +1058,6 @@ void emulate_xorps(const ZydisDisassembledInstruction* instr) {
 
     LOG(L"[+] XORPS executed");
 }
-
 void emulate_xor(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
     uint64_t result = 0;
@@ -1088,8 +1112,42 @@ void emulate_xor(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
+    // Update flags after XOR operation
+
+    // Zero Flag (ZF): Set if result is zero
+    g_regs.rflags.flags.ZF = (result == 0);
+
+    // Sign Flag (SF): Set if the result has the sign bit set (negative result)
+    g_regs.rflags.flags.SF = (result >> 63) & 1;
+
+    // Carry Flag (CF): Not modified by XOR
+    // CF = 0 (it stays unchanged)
+
+    // Overflow Flag (OF): Not modified by XOR
+    // OF = 0 (it stays unchanged)
+
+    // Parity Flag (PF): Set based on the parity of the least significant byte
+    uint8_t lowByte = result & 0xFF;
+    int bitCount = 0;
+    for (int i = 0; i < 8; ++i) {
+        bitCount += (lowByte >> i) & 1;
+    }
+    g_regs.rflags.flags.PF = (bitCount % 2 == 0);  // Even number of 1s means PF = 1
+
+    // Auxiliary Carry Flag (AF): XOR does not affect AF
+    g_regs.rflags.flags.AF = 0;  // AF = 0, since XOR doesn't affect AF
+
+    // Logging for debug
     LOG(L"[+] XOR => 0x" << std::hex << result);
+    LOG(L"[+] Flags => ZF=" << g_regs.rflags.flags.ZF
+        << ", SF=" << g_regs.rflags.flags.SF
+        << ", CF=" << g_regs.rflags.flags.CF
+        << ", OF=" << g_regs.rflags.flags.OF
+        << ", PF=" << g_regs.rflags.flags.PF
+        << ", AF=" << g_regs.rflags.flags.AF);
 }
+
+
 
 void emulate_cdqe(const ZydisDisassembledInstruction* instr) {
 
@@ -1369,6 +1427,7 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
 
 
 
+
 void emulate_and(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
@@ -1381,7 +1440,6 @@ void emulate_and(const ZydisDisassembledInstruction* instr) {
         result = lhs & rhs;
         set_register_value<uint64_t>(dst.reg.value, result);
     }
-
     else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
         lhs = get_register_value<uint64_t>(dst.reg.value);
 
@@ -1418,7 +1476,6 @@ void emulate_and(const ZydisDisassembledInstruction* instr) {
             }
         }
     }
-
     else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
         rhs = get_register_value<uint64_t>(src.reg.value);
 
@@ -1455,14 +1512,12 @@ void emulate_and(const ZydisDisassembledInstruction* instr) {
             }
         }
     }
-
     else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
         lhs = get_register_value<uint64_t>(dst.reg.value);
         rhs = static_cast<uint64_t>(src.imm.value.u);
         result = lhs & rhs;
         set_register_value<uint64_t>(dst.reg.value, result);
     }
-
     else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
         rhs = static_cast<uint64_t>(src.imm.value.u);
 
@@ -1499,13 +1554,16 @@ void emulate_and(const ZydisDisassembledInstruction* instr) {
             }
         }
     }
-
     else {
         LOG(L"[!] Unsupported AND instruction");
     }
 
+    // Update flags based on the result
+    update_flags_and(result, lhs, rhs, instr->info.operand_width);
+
     LOG(L"[+] AND => 0x" << std::hex << result);
 }
+
 
 void emulate_or(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -1873,7 +1931,7 @@ void emulate_cmpxchg(const ZydisDisassembledInstruction* instr) {
             equal = true;
         }
         else {
-           g_regs.rax.w = dst_val;
+            g_regs.rax.w = dst_val;
 
         }
 
@@ -2191,10 +2249,9 @@ void emulate_cmp(const ZydisDisassembledInstruction* instr) {
     const auto& op1 = instr->operands[0], op2 = instr->operands[1];
 
     uint64_t lhs = 0, rhs = 0;
-
     const auto width = instr->info.operand_width;
 
-    // Helper lambdas
+    // Helper lambdas for reading operand values
     auto read_operand_value = [width](const ZydisDecodedOperand& op, uint64_t& out) -> bool {
         if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
             switch (width) {
@@ -2223,38 +2280,114 @@ void emulate_cmp(const ZydisDisassembledInstruction* instr) {
         return false;
         };
 
+    // Read operand values
     if (!read_operand_value(op1, lhs) || !read_operand_value(op2, rhs)) {
         LOG(L"[!] Failed to read operands for CMP");
         return;
     }
 
+    // Perform the subtraction
     uint64_t result = lhs - rhs;
 
-    update_flags_sub(result, lhs, rhs, width);
+    // Update flags based on the result
+    g_regs.rflags.flags.ZF = (result == 0);
+    g_regs.rflags.flags.SF = ((result >> (width * 8 - 1)) & 1) != 0;
+    g_regs.rflags.flags.CF = lhs < rhs;
 
+    // Check for signed overflow
+    g_regs.rflags.flags.OF = (((lhs ^ rhs) & (lhs ^ result)) & (1ULL << (width * 8 - 1))) != 0;
+
+    // Check for parity
+    uint8_t lowByte = result & 0xFF;
+    int bitCount = 0;
+    for (int i = 0; i < 8; ++i) {
+        bitCount += (lowByte >> i) & 1;
+    }
+    g_regs.rflags.flags.PF = (bitCount % 2 == 0);  // Even number of 1 bits means PF = 1
+
+    // Auxiliary Carry Flag (AF)
+    // AF is set if there was a borrow in the lower 4 bits (nibble)
+    uint8_t lhs_low_nibble = lhs & 0xF;
+    uint8_t rhs_low_nibble = rhs & 0xF;
+    g_regs.rflags.flags.AF = (lhs_low_nibble < rhs_low_nibble);  // Borrow in the low nibble
+
+    // Logging for debug
     LOG(L"[+] CMP => 0x" << std::hex << lhs << L" ? 0x" << rhs);
+    LOG(L"[+] Flags => ZF=" << g_regs.rflags.flags.ZF
+        << ", SF=" << g_regs.rflags.flags.SF
+        << ", CF=" << g_regs.rflags.flags.CF
+        << ", OF=" << g_regs.rflags.flags.OF
+        << ", PF=" << g_regs.rflags.flags.PF
+        << ", AF=" << g_regs.rflags.flags.AF);
 }
+
 
 
 void emulate_inc(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
 
+    uint64_t value = 0;
+
+    // Handle register operand
     if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        uint64_t value = get_register_value<uint64_t>(op.reg.value);
-        value++;
+        value = get_register_value<uint64_t>(op.reg.value);
+        uint64_t prev_value = value;  // Save the previous value before increment
+
+        value++;  // Increment the value
         set_register_value(op.reg.value, value);
+
+        // Update the flags based on the result of INC
+        uint64_t result = value;
+
+        // Update Zero Flag (ZF)
+        g_regs.rflags.flags.ZF = (result == 0);
+
+        // Update Sign Flag (SF) - Checking the sign bit of the result
+        g_regs.rflags.flags.SF = (static_cast<int64_t>(result) < 0);
+
+        // Update Parity Flag (PF) - Checking the parity of the lowest byte of the previous value
+        g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
+
+        // Update Overflow Flag (OF) - Check for overflow
+        g_regs.rflags.flags.OF = ((prev_value == 0x7FFFFFFFFFFFFFFF && static_cast<int64_t>(result) < 0) ||
+            (prev_value == 0x8000000000000000 && static_cast<int64_t>(result) > 0));
+
+        // Carry Flag (CF) does not change for INC instruction
+        g_regs.rflags.flags.CF = 0;
     }
+    // Handle memory operand
     else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        uint64_t value = 0;
         if (!ReadEffectiveMemory(op, &value)) {
             LOG(L"[!] Failed to read memory for INC");
             return;
         }
-        value++;
+
+        uint64_t prev_value = value;  // Save the previous value before increment
+
+        value++;  // Increment the value
         if (!WriteEffectiveMemory(op, value)) {
             LOG(L"[!] Failed to write memory for INC");
             return;
         }
+
+        // Update the flags based on the result of INC
+        uint64_t result = value;
+
+        // Update Zero Flag (ZF)
+        g_regs.rflags.flags.ZF = (result == 0);
+
+        // Update Sign Flag (SF) - Checking the sign bit of the result
+        g_regs.rflags.flags.SF = (static_cast<int64_t>(result) < 0);
+
+        // Update Parity Flag (PF) - Checking the parity of the lowest byte of the previous value
+        g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
+
+        // Update Overflow Flag (OF) - Check for overflow
+        g_regs.rflags.flags.OF = ((prev_value == 0x7FFFFFFFFFFFFFFF && static_cast<int64_t>(result) < 0) ||
+            (prev_value == 0x8000000000000000 && static_cast<int64_t>(result) > 0));
+
+        // Carry Flag (CF) does not change for INC instruction
+        g_regs.rflags.flags.CF = 0;
     }
     else {
         LOG(L"[!] Unsupported operand type for INC");
@@ -2703,18 +2836,22 @@ void emulate_movdqa(const ZydisDisassembledInstruction* instr) {
 void emulate_mov(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
 
+    // MOV with immediate value
     if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
         set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(src.imm.value.u));
     }
+    // MOV between two registers
     else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
         uint64_t value = get_register_value<uint64_t>(src.reg.value);
         set_register_value<uint64_t>(dst.reg.value, value);
     }
+    // MOV from memory to register
     else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
         if (instr->info.operand_width == 64) {
             uint64_t value;
-            if (ReadEffectiveMemory(src, &value))
+            if (ReadEffectiveMemory(src, &value)) {
                 set_register_value<uint64_t>(dst.reg.value, value);
+            }
         }
         else if (instr->info.operand_width == 32) {
             uint32_t value;
@@ -2727,17 +2864,21 @@ void emulate_mov(const ZydisDisassembledInstruction* instr) {
             uint16_t value;
             if (ReadEffectiveMemory(src, &value)) {
                 set_register_value<uint16_t>(dst.reg.value, value);
-                set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(value));
+                set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(value)); // zero-extend
             }
         }
         else if (instr->info.operand_width == 8) {
             uint8_t value;
             if (ReadEffectiveMemory(src, &value)) {
-                set_register_value<uint8_t>(dst.reg.value, value);
-                set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(value));
+                // Only modify the 8-bit part of the destination register
+                uint64_t current_value = get_register_value<uint64_t>(dst.reg.value);
+                current_value &= 0xFFFFFFFFFFFFFF00;  // Clear the lower byte
+                current_value |= value;               // Set the lower byte to the new value
+                set_register_value<uint64_t>(dst.reg.value, current_value);
             }
         }
     }
+    // MOV from register to memory
     else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
         uint64_t value = get_register_value<uint64_t>(src.reg.value);
         if (instr->info.operand_width == 64) {
@@ -2753,6 +2894,7 @@ void emulate_mov(const ZydisDisassembledInstruction* instr) {
             WriteEffectiveMemory(dst, static_cast<uint8_t>(value));
         }
     }
+    // MOV with immediate to memory
     else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
         uint64_t value = src.imm.value.u;
         if (instr->info.operand_width == 64) {
@@ -2842,7 +2984,7 @@ void emulate_movzx(const ZydisDisassembledInstruction* instr) {
         case 4: {
             uint32_t val;
             if (!ReadEffectiveMemory(src, &val)) {
-                LOG(L"[!] Failed to read memory for MOVZX (dword)" );
+                LOG(L"[!] Failed to read memory for MOVZX (dword)");
                 exit(0);
             }
             zero_extended_value = val;
@@ -3005,17 +3147,30 @@ void emulate_sar(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_cpuid(const ZydisDisassembledInstruction*) {
+
     int cpu_info[4];
-    __cpuidex(cpu_info, static_cast<int>(g_regs.rax.q), static_cast<int>(g_regs.rcx.q));
-    g_regs.rax.q = static_cast<uint32_t>(cpu_info[0]);
-    g_regs.rbx.q = static_cast<uint32_t>(cpu_info[1]);
-    g_regs.rcx.q = static_cast<uint32_t>(cpu_info[2]);
-    g_regs.rdx.q = static_cast<uint32_t>(cpu_info[3]);
-    LOG(L"[+] CPUID Host => EAX: 0x" << std::hex << cpu_info[0] <<
-        L", EBX: 0x" << cpu_info[1] <<
-        L", ECX: 0x" << cpu_info[2] <<
-        L", EDX: 0x" << cpu_info[3]);
+    int input_eax = static_cast<int>(g_regs.rax.q);
+    int input_ecx = static_cast<int>(g_regs.rcx.q);
+
+
+    __cpuidex(cpu_info, input_eax, input_ecx);
+
+
+    g_regs.rax.q = static_cast<uint32_t>(cpu_info[0]);  // EAX
+    g_regs.rbx.q = static_cast<uint32_t>(cpu_info[1]);  // EBX
+    g_regs.rcx.q = static_cast<uint32_t>(cpu_info[2]);  // ECX
+    g_regs.rdx.q = static_cast<uint32_t>(cpu_info[3]);  // EDX
+
+
+    LOG(L"[+] CPUID Host => "
+        L"EAX: 0x" << std::hex << cpu_info[0] <<
+        L", EBX: 0x" << std::hex << cpu_info[1] <<
+        L", ECX: 0x" << std::hex << cpu_info[2] <<
+        L", EDX: 0x" << std::hex << cpu_info[3]);
+
+
 }
+
 uint64_t get_operand_value(const ZydisDecodedOperand& op, uint8_t operand_width) {
     uint64_t value = 0;
 
@@ -3057,7 +3212,7 @@ void emulate_test(const ZydisDisassembledInstruction* instr) {
 
     g_regs.rflags.flags.ZF = (result == 0);
     g_regs.rflags.flags.SF = (result >> (instr->info.operand_width - 1)) & 1;
-    g_regs.rflags.flags.PF = parity(static_cast<uint8_t>(result));
+    g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
     g_regs.rflags.flags.CF = 0;
     g_regs.rflags.flags.OF = 0;
 
@@ -3507,7 +3662,8 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
                 }
             }
         }
-        else {
+         else{
+            LOG("[+] EventCode : "<< dbgEvent.dwDebugEventCode);
             exit(0);
         }
 
