@@ -26,6 +26,15 @@ PROCESS_INFORMATION pi;
 #define LOG(x)
 #endif
 
+#define DB_ENABLED 1
+#if DB_ENABLED
+
+void StepOverAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread);
+void CompareRegistersWithEmulation(CONTEXT& ctx);
+bool no_cheek;
+uint64_t back_address;
+#endif
+
 typedef enum _THREADINFOCLASS {
     ThreadBasicInformation = 0
 } THREADINFOCLASS;
@@ -492,9 +501,13 @@ void update_flags_sub(uint64_t result, uint64_t val_dst, uint64_t val_src, int s
     g_regs.rflags.flags.ZF = (result == 0);
     g_regs.rflags.flags.SF = (result >> (size_bits - 1)) & 1;
     g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
+
+    // Correct AF calculation
+    g_regs.rflags.flags.AF = ((val_dst ^ val_src ^ result) >> 4) & 1;
+
+    // Overflow Flag
     g_regs.rflags.flags.OF = (((val_dst ^ val_src) & (val_dst ^ result)) >> (size_bits - 1)) & 1;
 }
-
 
 void update_flags_add(uint64_t result, uint64_t val_dst, uint64_t val_src, int size_bits) {
     uint64_t mask = (size_bits == 64) ? ~0ULL : ((1ULL << size_bits) - 1);
@@ -529,6 +542,33 @@ void update_flags_and(uint64_t result, uint64_t val_dst, uint64_t val_src, int s
 
     // Overflow Flag (OF) - for AND operation, OF is always 0
     g_regs.rflags.flags.OF = 0;
+}
+
+void update_flags_neg(uint64_t result, uint64_t val, int size_bits) {
+    uint64_t mask = (size_bits == 64) ? ~0ULL : ((1ULL << size_bits) - 1);
+    result &= mask; val &= mask;
+
+    g_regs.rflags.flags.CF = (val != 0);
+    g_regs.rflags.flags.ZF = (result == 0);
+    g_regs.rflags.flags.SF = (result >> (size_bits - 1)) & 1;
+    g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
+    g_regs.rflags.flags.AF = ((0 ^ val ^ result) >> 4) & 1;
+
+    // Correct OF calculation: set if result == MIN_SIGNED
+    switch (size_bits) {
+    case 8:
+        g_regs.rflags.flags.OF = (result == 0x80);
+        break;
+    case 16:
+        g_regs.rflags.flags.OF = (result == 0x8000);
+        break;
+    case 32:
+        g_regs.rflags.flags.OF = (result == 0x80000000);
+        break;
+    case 64:
+        g_regs.rflags.flags.OF = (result == 0x8000000000000000ULL);
+        break;
+    }
 }
 
 
@@ -2023,13 +2063,42 @@ void emulate_popfq(const ZydisDisassembledInstruction* instr) {
 
 void emulate_add(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
-    uint64_t lhs = get_register_value<uint64_t>(dst.reg.value);
-    uint64_t rhs = (src.type == ZYDIS_OPERAND_TYPE_REGISTER) ? get_register_value<uint64_t>(src.reg.value) : src.imm.value.u;
+    uint64_t lhs = 0, rhs = 0;
+
+    // Determine LHS (destination)
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        lhs = get_register_value<uint64_t>(dst.reg.value);
+    }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        ReadEffectiveMemory(dst, &lhs);
+    }
+
+    // Determine RHS (source)
+    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        rhs = get_register_value<uint64_t>(src.reg.value);
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        rhs = src.imm.value.u;
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        ReadEffectiveMemory(src, &rhs);
+    }
+
     uint64_t result = lhs + rhs;
-    set_register_value<uint64_t>(dst.reg.value, result);
+
+    // Write result back
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        set_register_value<uint64_t>(dst.reg.value, result);
+    }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        WriteEffectiveMemory(dst, result);
+    }
+
     update_flags_add(result, lhs, rhs, instr->info.operand_width);
+
     LOG(L"[+] ADD => 0x" << std::hex << result);
 }
+
 
 void emulate_bt(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -3147,7 +3216,9 @@ void emulate_sar(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_cpuid(const ZydisDisassembledInstruction*) {
-
+#if DB_ENABLED
+    no_cheek = 1;
+#endif
     int cpu_info[4];
     int input_eax = static_cast<int>(g_regs.rax.q);
     int input_ecx = static_cast<int>(g_regs.rcx.q);
@@ -3231,12 +3302,44 @@ void emulate_not(const ZydisDisassembledInstruction* instr) {
 
 void emulate_neg(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
-    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
-    val = -val;
-    set_register_value<uint64_t>(dst.reg.value, val);
-    LOG(L"[+] NEG => 0x" << std::hex << val);
-}
+    int width = instr->info.operand_width;
 
+    switch (width) {
+    case 8: {
+        uint8_t val = get_register_value<uint8_t>(dst.reg.value);
+        uint8_t res = -val;
+        set_register_value<uint8_t>(dst.reg.value, res);
+        update_flags_neg(res, val, 8);
+        break;
+    }
+    case 16: {
+        uint16_t val = get_register_value<uint16_t>(dst.reg.value);
+        uint16_t res = -val;
+        set_register_value<uint16_t>(dst.reg.value, res);
+        update_flags_neg(res, val, 16);
+        break;
+    }
+    case 32: {
+        uint32_t val = get_register_value<uint32_t>(dst.reg.value);
+        uint32_t res = -val;
+        set_register_value<uint32_t>(dst.reg.value, res);
+        update_flags_neg(res, val, 32);
+        break;
+    }
+    case 64: {
+        uint64_t val = get_register_value<uint64_t>(dst.reg.value);
+        uint64_t res = -val;
+        set_register_value<uint64_t>(dst.reg.value, res);
+        update_flags_neg(res, val, 64);
+        break;
+    }
+    default:
+        LOG(L"[!] Unsupported NEG operand width: " << width);
+            return;
+    }
+
+    LOG(L"[+] NEG executed (width: " << width << ")");
+}
 void emulate_jmp(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
 
@@ -3382,7 +3485,82 @@ void emulate_setz(const ZydisDisassembledInstruction* instr) {
 }
 
 // ------------------- Emulator Loop -------------------
+#if DB_ENABLED
+void start_emulation(uint64_t startAddress) {
+    uint64_t address = startAddress;
+    BYTE buffer[16] = { 0 };
+    SIZE_T bytesRead = 0;
+    Zydis disasm(true);
 
+
+
+    while (true) {
+        //only for debugging purposes
+        //DumpRegisters();
+        if (!ReadProcessMemory(hProcess, (LPCVOID)address, buffer, sizeof(buffer), &bytesRead) || bytesRead == 0)
+            break;
+        if (disasm.Disassemble(address, buffer, bytesRead)) {
+            const ZydisDisassembledInstruction* op = disasm.GetInstr();
+            instr = op->info;
+
+            std::string instrText = disasm.InstructionText();
+            LOG(L"0x" << std::hex << disasm.Address()
+                << L": " << std::wstring(instrText.begin(), instrText.end()));
+
+
+            bool has_lock = (instr.attributes & ZYDIS_ATTRIB_HAS_LOCK) != 0;
+            if (has_lock) {
+                LOG(L"[~] LOCK prefix detected.");
+            }
+            bool has_rep = (instr.attributes & ZYDIS_ATTRIB_HAS_REP) != 0;
+            if (has_rep) {
+                LOG(L"[~] REP prefix detected.");
+            }
+            bool has_VEX = (instr.attributes & ZYDIS_ATTRIB_HAS_VEX) != 0;
+            if (has_VEX) {
+                LOG(L"[~] VEX prefix detected.");
+            }
+
+
+            auto it = dispatch_table.find(instr.mnemonic);
+            if (it != dispatch_table.end()) {
+                it->second(op);
+            }
+            else {
+                std::wcout << L"[!] Instruction not implemented: "
+                    << std::wstring(instrText.begin(), instrText.end()) << std::endl;
+                exit(0);
+            }
+
+
+            if (!disasm.IsJump() &&
+                instr.mnemonic != ZYDIS_MNEMONIC_CALL &&
+                instr.mnemonic != ZYDIS_MNEMONIC_RET)
+            {
+
+                g_regs.rip += instr.length;
+
+            }
+            else {
+                no_cheek = 1;
+                back_address = address + instr.length;
+            }
+
+            address = g_regs.rip;
+
+
+            StepOverAndEmulate(pi.hProcess, address, pi.hThread);
+
+
+        }
+
+        else {
+            std::wcout << L"Failed to disassemble at address 0x" << std::hex << address << std::endl;
+            break;
+        }
+    }
+}
+#else
 void start_emulation(uint64_t startAddress) {
     uint64_t address = startAddress;
     BYTE buffer[16] = { 0 };
@@ -3450,6 +3628,9 @@ void start_emulation(uint64_t startAddress) {
         }
     }
 }
+#endif
+
+
 
 // ------------------- PE Helpers -------------------
 
@@ -3534,6 +3715,280 @@ std::vector<uint32_t> GetTLSCallbackRVAs(const std::wstring& exePath) {
         tlsCallbacks.push_back(static_cast<uint32_t>(callback - optionalHeader.ImageBase));
     return tlsCallbacks;
 }
+
+
+
+#if DB_ENABLED
+void CompareRFlags(const CONTEXT& ctx) {
+
+    if (g_regs.rflags.flags.CF != ((ctx.EFlags >> 0) & 1)) {
+        std::wcout << L"[!] CF mismatch: Emulated=" << g_regs.rflags.flags.CF
+            << L", Actual=" << ((ctx.EFlags >> 0) & 1) << std::endl;
+        
+    }
+
+    if (g_regs.rflags.flags.PF != ((ctx.EFlags >> 2) & 1)) {
+        std::wcout << L"[!] PF mismatch: Emulated=" << g_regs.rflags.flags.PF
+            << L", Actual=" << ((ctx.EFlags >> 2) & 1) << std::endl;
+    }
+
+    if (g_regs.rflags.flags.AF != ((ctx.EFlags >> 4) & 1)) {
+        std::wcout << L"[!] AF mismatch: Emulated=" << g_regs.rflags.flags.AF
+            << L", Actual=" << ((ctx.EFlags >> 4) & 1) << std::endl;
+    }
+
+    if (g_regs.rflags.flags.ZF != ((ctx.EFlags >> 6) & 1)) {
+        std::wcout << L"[!] ZF mismatch: Emulated=" << g_regs.rflags.flags.ZF
+            << L", Actual=" << ((ctx.EFlags >> 6) & 1) << std::endl;
+    }
+
+    if (g_regs.rflags.flags.SF != ((ctx.EFlags >> 7) & 1)) {
+        std::wcout << L"[!] SF mismatch: Emulated=" << g_regs.rflags.flags.SF
+            << L", Actual=" << ((ctx.EFlags >> 7) & 1) << std::endl;
+    }
+
+    if (g_regs.rflags.flags.TF != ((ctx.EFlags >> 8) & 1)) {
+        std::wcout << L"[!] TF mismatch: Emulated=" << g_regs.rflags.flags.TF
+            << L", Actual=" << ((ctx.EFlags >> 8) & 1) << std::endl;
+    }
+
+    if (g_regs.rflags.flags.IF != ((ctx.EFlags >> 9) & 1)) {
+        std::wcout << L"[!] IF mismatch: Emulated=" << g_regs.rflags.flags.IF
+            << L", Actual=" << ((ctx.EFlags >> 9) & 1) << std::endl;
+    }
+
+    if (g_regs.rflags.flags.DF != ((ctx.EFlags >> 10) & 1)) {
+        std::wcout << L"[!] DF mismatch: Emulated=" << g_regs.rflags.flags.DF
+            << L", Actual=" << ((ctx.EFlags >> 10) & 1) << std::endl;
+    }
+
+    if (g_regs.rflags.flags.OF != ((ctx.EFlags >> 11) & 1)) {
+        std::wcout << L"[!] OF mismatch: Emulated=" << g_regs.rflags.flags.OF
+            << L", Actual=" << ((ctx.EFlags >> 11) & 1) << std::endl;
+    }
+
+
+    bool flags_mismatch = false;
+    if (g_regs.rflags.value != ctx.EFlags) {
+        flags_mismatch = true;
+        std::wcout << L"[!] Full RFLAGS mismatch: Emulated=0x" << std::hex << g_regs.rflags.value
+            << L", Actual=0x" << std::hex << ctx.EFlags << std::endl;
+    }
+
+
+    if (flags_mismatch) {
+        exit(0);
+    }
+}
+void CompareRegistersWithEmulation(CONTEXT& ctx) {
+
+    if (g_regs.rip != ctx.Rip) {
+        std::wcout << L"[!] RIP mismatch: Emulated=0x" << std::hex << g_regs.rip
+            << L", Actual=0x" << std::hex << ctx.Rip << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+
+
+    if (g_regs.rsp.q != ctx.Rsp) {
+        std::wcout << L"[!] RSP mismatch: Emulated=0x" << std::hex << g_regs.rsp.q
+            << L", Actual=0x" << std::hex << ctx.Rsp << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+
+
+    if (g_regs.rbp.q != ctx.Rbp) {
+        std::wcout << L"[!] RBP mismatch: Emulated=0x" << std::hex << g_regs.rbp.q
+            << L", Actual=0x" << std::hex << ctx.Rbp << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+
+    if (g_regs.rax.q != ctx.Rax) {
+        std::wcout << L"[!] RAX mismatch: Emulated=0x" << std::hex << g_regs.rax.q
+            << L", Actual=0x" << std::hex << ctx.Rax << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.rbx.q != ctx.Rbx) {
+        std::wcout << L"[!] RBX mismatch: Emulated=0x" << std::hex << g_regs.rbx.q
+            << L", Actual=0x" << std::hex << ctx.Rbx << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.rcx.q != ctx.Rcx) {
+        std::wcout << L"[!] RCX mismatch: Emulated=0x" << std::hex << g_regs.rcx.q
+            << L", Actual=0x" << std::hex << ctx.Rcx << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.rdx.q != ctx.Rdx) {
+        std::wcout << L"[!] RDX mismatch: Emulated=0x" << std::hex << g_regs.rdx.q
+            << L", Actual=0x" << std::hex << ctx.Rdx << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.rsi.q != ctx.Rsi) {
+        std::wcout << L"[!] RSI mismatch: Emulated=0x" << std::hex << g_regs.rsi.q
+            << L", Actual=0x" << std::hex << ctx.Rsi << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.rdi.q != ctx.Rdi) {
+        std::wcout << L"[!] RDI mismatch: Emulated=0x" << std::hex << g_regs.rdi.q
+            << L", Actual=0x" << std::hex << ctx.Rdi << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+
+    // مقایسه سایر رجیسترها از R8 تا R15
+    if (g_regs.r8.q != ctx.R8) {
+        std::wcout << L"[!] R8 mismatch: Emulated=0x" << std::hex << g_regs.r8.q
+            << L", Actual=0x" << std::hex << ctx.R8 << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.r9.q != ctx.R9) {
+        std::wcout << L"[!] R9 mismatch: Emulated=0x" << std::hex << g_regs.r9.q
+            << L", Actual=0x" << std::hex << ctx.R9 << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.r10.q != ctx.R10) {
+        std::wcout << L"[!] R10 mismatch: Emulated=0x" << std::hex << g_regs.r10.q
+            << L", Actual=0x" << std::hex << ctx.R10 << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.r11.q != ctx.R11) {
+        std::wcout << L"[!] R11 mismatch: Emulated=0x" << std::hex << g_regs.r11.q
+            << L", Actual=0x" << std::hex << ctx.R11 << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.r12.q != ctx.R12) {
+        std::wcout << L"[!] R12 mismatch: Emulated=0x" << std::hex << g_regs.r12.q
+            << L", Actual=0x" << std::hex << ctx.R12 << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.r13.q != ctx.R13) {
+        std::wcout << L"[!] R13 mismatch: Emulated=0x" << std::hex << g_regs.r13.q
+            << L", Actual=0x" << std::hex << ctx.R13 << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.r14.q != ctx.R14) {
+        std::wcout << L"[!] R14 mismatch: Emulated=0x" << std::hex << g_regs.r14.q
+            << L", Actual=0x" << std::hex << ctx.R14 << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+    if (g_regs.r15.q != ctx.R15) {
+        std::wcout << L"[!] R15 mismatch: Emulated=0x" << std::hex << g_regs.r15.q
+            << L", Actual=0x" << std::hex << ctx.R15 << std::endl;
+        DumpRegisters();
+        exit(0);
+    }
+
+    // مقایسه RFLAGS
+    if (g_regs.rflags.value != ctx.EFlags) {
+        CompareRFlags(ctx);
+    }
+
+    // مقایسه XMM (YMM) رجیسترها (برای SIMD)
+    for (int i = 0; i < 16; i++) {
+        if (memcmp(g_regs.ymm[i].xmm, &ctx.Xmm0 + i, 16) != 0) {
+            std::wcout << L"[!] XMM" << i << L" mismatch" << std::endl;
+            DumpRegisters();
+            exit(0);
+        }
+    }
+}
+void StepOverAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread) {
+    // Set new breakpoint
+    BYTE origByte;
+    if (!SetBreakpoint(hProcess, newAddress, origByte)) {
+        std::wcout << L"[!]StepOverAndEmulate Failed to set breakpoint at 0x" << std::hex << newAddress << std::endl;
+        exit(0);
+        return;
+    }
+
+    lastBreakpointAddr = newAddress;
+    lastOrigByte = origByte;
+
+    // Save the original context of the thread
+    CONTEXT ctx = { 0 };
+    ctx.ContextFlags = CONTEXT_FULL;
+
+    if (!GetThreadContext(hThread, &ctx)) {
+        std::wcout << L"[!] Failed to get thread context before stepping" << std::endl;
+        return;
+    }
+
+    // Update the thread context with the single step flag if needed
+    if (!SetThreadContext(hThread, &ctx)) {
+        std::wcout << L"[!] Failed to set thread context with single step flag" << std::endl;
+        return;
+    }
+
+    ContinueDebugEvent(pi.dwProcessId, GetThreadId(hThread), DBG_CONTINUE);
+    DEBUG_EVENT dbgEvent;
+    while (true) {
+        if (!WaitForDebugEvent(&dbgEvent, INFINITE)) break;
+
+        DWORD continueStatus = DBG_CONTINUE;
+
+        if (dbgEvent.dwDebugEventCode == EXCEPTION_DEBUG_EVENT) {
+            auto& er = dbgEvent.u.Exception.ExceptionRecord;
+            if (er.ExceptionCode == EXCEPTION_BREAKPOINT) {
+                uint64_t exAddr = reinterpret_cast<uint64_t>(er.ExceptionAddress);
+                if (exAddr == newAddress) {
+                    // Remove breakpoint
+                    RemoveBreakpoint(hProcess, newAddress, origByte);
+
+                    // Adjust RIP
+                    CONTEXT ctxHit = { 0 };
+                    ctxHit.ContextFlags = CONTEXT_FULL;
+                    if (GetThreadContext(hThread, &ctxHit)) {
+                        ctxHit.Rip -= 1;
+                        SetThreadContext(hThread, &ctxHit);
+
+                        if (no_cheek) {
+                            if (!(g_regs.rip >= startaddr && g_regs.rip <= endaddr)) {
+                                // uint64_t value = 0;
+                               //  ReadMemory(g_regs.rsp.q, &value, 8);
+                                LOG("set brack point on : " << std::hex << back_address);
+                                SetSingleBreakpointAndEmulate(pi.hProcess, back_address, pi.hThread);
+                            }
+                        }
+                        else {
+                        CompareRegistersWithEmulation(ctxHit);
+                        }
+
+
+
+
+
+                    }
+
+                    // Emulate from breakpoint address
+                    start_emulation(exAddr);
+                    break;
+                }
+            }
+        }
+        else {
+            exit(0);
+        }
+
+    }
+
+
+}
+#endif
+
 
 void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread) {
     // Set new breakpoint
