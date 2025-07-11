@@ -3317,6 +3317,24 @@ void emulate_shr(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] SHR => 0x" << std::hex << val);
 }
 
+void emulate_stosb(const ZydisDisassembledInstruction* instr) {
+    uint8_t al_val = static_cast<uint8_t>(g_regs.rax.l);
+    uint64_t dest = g_regs.rdi.q;
+
+    if (!WriteMemory(dest, &al_val, sizeof(uint8_t))) {
+        LOG(L"[!] STOSB: Failed to write memory at 0x" << std::hex << dest);
+        return;
+    }
+
+    LOG(L"[+] STOSB: Wrote 0x" << std::hex << static_cast<int>(al_val)
+        << L" to [RDI] = 0x" << dest);
+
+
+    int delta = (g_regs.rflags.flags.DF) ? -1 : 1;
+    g_regs.rdi.q += delta;
+
+    LOG(L"[+] STOSB: RDI updated to 0x" << std::hex << g_regs.rdi.q);
+}
 
 
 void emulate_jbe(const ZydisDisassembledInstruction* instr) {
@@ -3784,6 +3802,25 @@ void emulate_setz(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] SETZ => " << std::hex << static_cast<int>(value));
 }
 
+void emulate_stosd(const ZydisDisassembledInstruction* instr) {
+    uint32_t eax_val = static_cast<uint32_t>(g_regs.rax.d);
+    uint64_t dest = g_regs.rdi.q;
+
+    if (!WriteMemory(dest, &eax_val, sizeof(uint32_t))) {
+        LOG(L"[!] STOSD: Failed to write memory at 0x" << std::hex << dest);
+        return;
+    }
+
+    LOG(L"[+] STOSD: Wrote 0x" << std::hex << eax_val << L" to [RDI] = 0x" << dest);
+
+    // Adjust EDI based on Direction Flag (DF)
+    int delta = (g_regs.rflags.flags.DF) ? -4 : 4;
+    g_regs.rdi.q += delta;
+
+    LOG(L"[+] STOSD: RDI updated to 0x" << std::hex << g_regs.rdi.q);
+}
+
+
 // ------------------- Emulator Loop -------------------
 #if DB_ENABLED
 void start_emulation(uint64_t startAddress) {
@@ -3887,6 +3924,7 @@ void start_emulation(uint64_t startAddress) {
             bool has_rep = (instr.attributes & ZYDIS_ATTRIB_HAS_REP) != 0;
             if (has_rep) {
                 LOG(L"[~] REP prefix detected.");
+                exit(0);
             }
             bool has_VEX = (instr.attributes & ZYDIS_ATTRIB_HAS_VEX) != 0;
             if (has_VEX) {
@@ -4504,6 +4542,9 @@ int wmain(int argc, wchar_t* argv[]) {
         { ZYDIS_MNEMONIC_CLC, emulate_clc },
         { ZYDIS_MNEMONIC_ADC, emulate_adc },
         { ZYDIS_MNEMONIC_STC, emulate_stc },
+        { ZYDIS_MNEMONIC_STOSD, emulate_stosd },
+         { ZYDIS_MNEMONIC_STOSB, emulate_stosb },
+        
     };
 
     STARTUPINFOW si = { sizeof(si) };
