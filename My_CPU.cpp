@@ -2317,16 +2317,16 @@ void emulate_rcr(const ZydisDisassembledInstruction* instr) {
     case 64: set_register_value<uint64_t>(dst.reg.value, val); break;
     }
 
-    if (count == 1) {
-        bool msb = (val >> (width - 1)) & 1;
-        bool second_msb = (val >> (width - 2)) & 1;
-        g_regs.rflags.flags.OF = msb ^ second_msb;
-        g_regs.rflags.flags.SF = old_CF; 
+    if (width > 32) {
+    g_regs.rflags.flags.SF = !((val >> (width - 1)) & 1);
     }
     else {
-
-        g_regs.rflags.flags.SF = (val >> (width - 1)) & 1;
+        g_regs.rflags.flags.SF = ((val >> (width - 1)) & 1);
     }
+
+    bool msb_before = (val >> (width - 1)) & 1;  
+    bool msb_after = (val >> (width - 2)) & 1;  
+    g_regs.rflags.flags.OF = msb_before ^ msb_after;
 
     g_regs.rflags.flags.ZF = (val == 0);
     g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(val));
