@@ -26,7 +26,7 @@ PROCESS_INFORMATION pi;
 #define LOG(x)
 #endif
 
-#define DB_ENABLED 1
+#define DB_ENABLED 0
 
 #if DB_ENABLED
 void StepOverAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread);
@@ -506,7 +506,14 @@ void update_flags_or(uint64_t result, uint64_t val_dst, uint64_t val_src, int si
     g_regs.rflags.flags.ZF = (result == 0);
     g_regs.rflags.flags.SF = (result >> (size_bits - 1)) & 1;
     g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
-    g_regs.rflags.flags.AF = ((val_dst ^ val_src ^ result) >> 4) & 1;
+    
+    if (size_bits <= 32) {
+        g_regs.rflags.flags.AF = 0;
+    }
+    else {
+        g_regs.rflags.flags.AF = ((val_dst ^ val_src ^ result) >> 4) & 1;
+    }
+
 
 }
 
@@ -1224,10 +1231,10 @@ void emulate_sbb(const ZydisDisassembledInstruction* instr) {
 
 
 
-    g_regs.rflags.flags.CF = (result64 >> 32) & 1;          // Carry flag (Borrow)
-    g_regs.rflags.flags.ZF = (result == 0);                 // Zero flag
-    g_regs.rflags.flags.SF = (result & 0x80000000) != 0;    // Sign flag (بیت علامت)
-    g_regs.rflags.flags.PF = parity(result & 0xFF); // Parity flag (مثلاً با GCC)
+    g_regs.rflags.flags.CF = (result64 >> 32) & 1;         
+    g_regs.rflags.flags.ZF = (result == 0);                 
+    g_regs.rflags.flags.SF = (result & 0x80000000) != 0;    
+    g_regs.rflags.flags.PF = !parity(result & 0xFF);
 
     bool dst_sign = (dst_val & 0x80000000) != 0;
     bool src_sign = (src_val & 0x80000000) != 0;
@@ -2274,18 +2281,26 @@ void emulate_div(const ZydisDisassembledInstruction* instr) {
         LOG(L"[!] Unsupported operand width for DIV");
     }
 }
-void emulate_rcr(const ZydisDisassembledInstruction* instr) {
-    auto& dst = instr->operands[0];
-    auto& src = instr->operands[1];
 
-    const auto width = instr->info.operand_width;
+void emulate_rcr(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    uint8_t width = instr->info.operand_width; // bit width: 8, 16, 32, 64
+
+    auto zero_extend = [](uint64_t val, uint8_t bits) -> uint64_t {
+        uint64_t mask = (bits < 64) ? ((1ULL << bits) - 1) : ~0ULL;
+        return val & mask;
+        };
 
     uint64_t val = 0;
-    switch (width) {
-    case 8:  val = get_register_value<uint8_t>(dst.reg.value); break;
-    case 16: val = get_register_value<uint16_t>(dst.reg.value); break;
-    case 32: val = get_register_value<uint32_t>(dst.reg.value); break;
-    case 64: val = get_register_value<uint64_t>(dst.reg.value); break;
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        // MOV from register to register or register to immediate (already covered in previous version)
+        switch (width) {
+        case 8:  val = get_register_value<uint8_t>(dst.reg.value); break;
+        case 16: val = get_register_value<uint16_t>(dst.reg.value); break;
+        case 32: val = get_register_value<uint32_t>(dst.reg.value); break;
+        case 64: val = get_register_value<uint64_t>(dst.reg.value); break;
+        }
     }
 
     uint8_t count = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
@@ -2298,42 +2313,43 @@ void emulate_rcr(const ZydisDisassembledInstruction* instr) {
     bool old_CF = g_regs.rflags.flags.CF;
 
     for (int i = 0; i < count; ++i) {
-        bool new_CF = val & 1; // LSB goes to CF
+        bool new_CF = val & 1;
         val >>= 1;
         if (old_CF)
-            val |= (1ULL << (width - 1)); // CF goes to MSB
+            val |= (1ULL << (width - 1));
         else
-            val &= ~(1ULL << (width - 1)); // clear MSB if CF=0
+            val &= ~(1ULL << (width - 1));
 
         old_CF = new_CF;
     }
 
     g_regs.rflags.flags.CF = old_CF;
 
-    switch (width) {
-    case 8:  set_register_value<uint8_t>(dst.reg.value, static_cast<uint8_t>(val)); break;
-    case 16: set_register_value<uint16_t>(dst.reg.value, static_cast<uint16_t>(val)); break;
-    case 32: set_register_value<uint32_t>(dst.reg.value, static_cast<uint32_t>(val)); break;
-    case 64: set_register_value<uint64_t>(dst.reg.value, val); break;
+    // ذخیره نتیجه در رجیستر
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        switch (width) {
+        case 8:  set_register_value<uint8_t>(dst.reg.value, static_cast<uint8_t>(val)); break;
+        case 16: set_register_value<uint16_t>(dst.reg.value, static_cast<uint16_t>(val)); break;
+        case 32: set_register_value<uint32_t>(dst.reg.value, static_cast<uint32_t>(val)); break;
+        case 64: set_register_value<uint64_t>(dst.reg.value, val); break;
+        }
     }
 
+    // پرچم‌ها
     if (width > 32) {
-    g_regs.rflags.flags.SF = !((val >> (width - 1)) & 1);
+        g_regs.rflags.flags.SF = !((val >> (width - 1)) & 1);
     }
     else {
         g_regs.rflags.flags.SF = ((val >> (width - 1)) & 1);
     }
-
-    bool msb_before = (val >> (width - 1)) & 1;  
-    bool msb_after = (val >> (width - 2)) & 1;  
-    g_regs.rflags.flags.OF = msb_before ^ msb_after;
+    bool msb_after = (val >> (width - 2)) & 1;
+    g_regs.rflags.flags.OF = msb_after;
 
     g_regs.rflags.flags.ZF = (val == 0);
     g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(val));
 
     LOG(L"[+] RCR => 0x" << std::hex << val);
 }
-
 
 
 void emulate_clc(const ZydisDisassembledInstruction* instr) {
@@ -2479,7 +2495,7 @@ void emulate_inc(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
 
     uint64_t value = 0;
-
+    auto size_bits = op.size;
     // Handle register operand
     if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
         value = get_register_value<uint64_t>(op.reg.value);
@@ -2498,7 +2514,11 @@ void emulate_inc(const ZydisDisassembledInstruction* instr) {
         g_regs.rflags.flags.SF = (static_cast<int64_t>(result) < 0);
 
         // Update Parity Flag (PF) - Checking the parity of the lowest byte of the previous value
-        g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
+        if (size_bits <= 32) {
+            g_regs.rflags.flags.PF = parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
+        } else {
+            g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
+        }
 
         // Update Overflow Flag (OF) - Check for overflow
         g_regs.rflags.flags.OF = ((prev_value == 0x7FFFFFFFFFFFFFFF && static_cast<int64_t>(result) < 0) ||
@@ -2532,7 +2552,11 @@ void emulate_inc(const ZydisDisassembledInstruction* instr) {
         g_regs.rflags.flags.SF = (static_cast<int64_t>(result) < 0);
 
         // Update Parity Flag (PF) - Checking the parity of the lowest byte of the previous value
-        g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
+        if (size_bits <= 32) {
+            g_regs.rflags.flags.PF = parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
+        } else {
+            g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
+        }
 
         // Update Overflow Flag (OF) - Check for overflow
         g_regs.rflags.flags.OF = ((prev_value == 0x7FFFFFFFFFFFFFFF && static_cast<int64_t>(result) < 0) ||
@@ -3511,55 +3535,198 @@ void emulate_test(const ZydisDisassembledInstruction* instr) {
         << L", SF=" << g_regs.rflags.flags.SF);
 }
 
-
 void emulate_not(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
-    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
-    val = ~val;
-    set_register_value<uint64_t>(dst.reg.value, val);
-    LOG(L"[+] NOT => 0x" << std::hex << val);
+    uint8_t width = instr->info.operand_width; // عرض (width) 8، 16، 32 یا 64
+
+    // Helper lambda to extend value to 64 bits for memory operations
+    auto zero_extend = [](uint64_t val, uint8_t bits) -> uint64_t {
+        uint64_t mask = (bits < 64) ? ((1ULL << bits) - 1) : ~0ULL;
+        return val & mask;
+        };
+
+    switch (dst.type) {
+    case ZYDIS_OPERAND_TYPE_REGISTER: {
+        // برای رجیسترها مشابه قبل عمل می‌کنیم
+        switch (width) {
+        case 8: {
+            uint8_t val = get_register_value<uint8_t>(dst.reg.value);
+            uint8_t res = ~val;
+            set_register_value<uint8_t>(dst.reg.value, res);
+            LOG(L"[+] NOT => 0x" << std::hex << static_cast<int>(res));
+            break;
+        }
+        case 16: {
+            uint16_t val = get_register_value<uint16_t>(dst.reg.value);
+            uint16_t res = ~val;
+            set_register_value<uint16_t>(dst.reg.value, res);
+            LOG(L"[+] NOT => 0x" << std::hex << res);
+            break;
+        }
+        case 32: {
+            uint32_t val = get_register_value<uint32_t>(dst.reg.value);
+            uint32_t res = ~val;
+            set_register_value<uint32_t>(dst.reg.value, res);
+            LOG(L"[+] NOT => 0x" << std::hex << res);
+            break;
+        }
+        case 64: {
+            uint64_t val = get_register_value<uint64_t>(dst.reg.value);
+            uint64_t res = ~val;
+            set_register_value<uint64_t>(dst.reg.value, res);
+            LOG(L"[+] NOT => 0x" << std::hex << res);
+            break;
+        }
+        default:
+            LOG(L"[!] Unsupported NOT operand width: " << width);
+            return;
+        }
+        break;
+    }
+    case ZYDIS_OPERAND_TYPE_MEMORY: {
+        // برای عملیات حافظه
+        if (width == 64) {
+            uint64_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                uint64_t res = ~value;
+                WriteEffectiveMemory(dst, res);
+                LOG(L"[+] NOT => 0x" << std::hex << res);
+            }
+        }
+        else if (width == 32) {
+            uint32_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                uint32_t res = ~value;
+                WriteEffectiveMemory(dst, res);
+                LOG(L"[+] NOT => 0x" << std::hex << res);
+            }
+        }
+        else if (width == 16) {
+            uint16_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                uint16_t res = ~value;
+                WriteEffectiveMemory(dst, res);
+                LOG(L"[+] NOT => 0x" << std::hex << res);
+            }
+        }
+        else if (width == 8) {
+            uint8_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                uint8_t res = ~value;
+                WriteEffectiveMemory(dst, res);
+                LOG(L"[+] NOT => 0x" << std::hex << static_cast<int>(res));
+            }
+        }
+        else {
+            LOG(L"[!] Unsupported NOT operand width: " << width);
+            return;
+        }
+        break;
+    }
+    default:
+        LOG(L"[!] Unsupported NOT operand type");
+        return;
+    }
+
+    LOG(L"[+] NOT executed (width: " << width << ")");
 }
 
 void emulate_neg(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     int width = instr->info.operand_width;
 
-    switch (width) {
-    case 8: {
-        uint8_t val = get_register_value<uint8_t>(dst.reg.value);
-        uint8_t res = -val;
-        set_register_value<uint8_t>(dst.reg.value, res);
-        update_flags_neg(res, val, 8);
+    // Helper lambda to extend value to 64 bits for memory operations
+    auto zero_extend = [](uint64_t val, uint8_t bits) -> uint64_t {
+        uint64_t mask = (bits < 64) ? ((1ULL << bits) - 1) : ~0ULL;
+        return val & mask;
+        };
+
+    switch (dst.type) {
+    case ZYDIS_OPERAND_TYPE_REGISTER: {
+        switch (width) {
+        case 8: {
+            uint8_t val = get_register_value<uint8_t>(dst.reg.value);
+            uint8_t res = -val;
+            set_register_value<uint8_t>(dst.reg.value, res);
+            update_flags_neg(res, val, 8);
+            break;
+        }
+        case 16: {
+            uint16_t val = get_register_value<uint16_t>(dst.reg.value);
+            uint16_t res = -val;
+            set_register_value<uint16_t>(dst.reg.value, res);
+            update_flags_neg(res, val, 16);
+            break;
+        }
+        case 32: {
+            uint32_t val = get_register_value<uint32_t>(dst.reg.value);
+            uint32_t res = -val;
+            set_register_value<uint32_t>(dst.reg.value, res);
+            update_flags_neg(res, val, 32);
+            break;
+        }
+        case 64: {
+            uint64_t val = get_register_value<uint64_t>(dst.reg.value);
+            uint64_t res = -val;
+            set_register_value<uint64_t>(dst.reg.value, res);
+            update_flags_neg(res, val, 64);
+            break;
+        }
+        default:
+            LOG(L"[!] Unsupported NEG operand width: " << width);
+            return;
+        }
         break;
     }
-    case 16: {
-        uint16_t val = get_register_value<uint16_t>(dst.reg.value);
-        uint16_t res = -val;
-        set_register_value<uint16_t>(dst.reg.value, res);
-        update_flags_neg(res, val, 16);
-        break;
-    }
-    case 32: {
-        uint32_t val = get_register_value<uint32_t>(dst.reg.value);
-        uint32_t res = -val;
-        set_register_value<uint32_t>(dst.reg.value, res);
-        update_flags_neg(res, val, 32);
-        break;
-    }
-    case 64: {
-        uint64_t val = get_register_value<uint64_t>(dst.reg.value);
-        uint64_t res = -val;
-        set_register_value<uint64_t>(dst.reg.value, res);
-        update_flags_neg(res, val, 64);
+    case ZYDIS_OPERAND_TYPE_MEMORY: {
+        // NEG for memory
+        if (width == 64) {
+            uint64_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                uint64_t res = -value;
+                WriteEffectiveMemory(dst, res);
+                update_flags_neg(res, value, 64);
+            }
+        }
+        else if (width == 32) {
+            uint32_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                uint32_t res = -value;
+                WriteEffectiveMemory(dst, res);
+                update_flags_neg(res, value, 32);
+            }
+        }
+        else if (width == 16) {
+            uint16_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                uint16_t res = -value;
+                WriteEffectiveMemory(dst, res);
+                update_flags_neg(res, value, 16);
+            }
+        }
+        else if (width == 8) {
+            uint8_t value;
+            if (ReadEffectiveMemory(dst, &value)) {
+                uint8_t res = -value;
+                WriteEffectiveMemory(dst, res);
+                update_flags_neg(res, value, 8);
+            }
+        }
+        else {
+            LOG(L"[!] Unsupported NEG operand width: " << width);
+            return;
+        }
         break;
     }
     default:
-        LOG(L"[!] Unsupported NEG operand width: " << width);
-            return;
+        LOG(L"[!] Unsupported NEG operand type");
+        return;
     }
 
     LOG(L"[+] NEG executed (width: " << width << ")");
 }
+
+
 void emulate_jmp(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
 
@@ -3716,7 +3883,7 @@ void start_emulation(uint64_t startAddress) {
 
     while (true) {
         //only for debugging purposes
-        //DumpRegisters();
+       // DumpRegisters();
         if (!ReadProcessMemory(hProcess, (LPCVOID)address, buffer, sizeof(buffer), &bytesRead) || bytesRead == 0)
             break;
         if (disasm.Disassemble(address, buffer, bytesRead)) {
