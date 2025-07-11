@@ -69,7 +69,7 @@ extern "C" NTSTATUS NTAPI NtQueryInformationThread(
 HANDLE hProcess;
 
 extern "C" uint64_t __cdecl xgetbv_asm(uint32_t ecx);
-
+extern "C" long sub_numbers(long a, long b);
 template<typename T>
 T get_register_value(ZydisRegister reg);
 // ------------------- Register Structures -------------------
@@ -641,196 +641,100 @@ void emulate_vzeroupper(const ZydisDisassembledInstruction* instr) {
 }
 void emulate_mul(const ZydisDisassembledInstruction* instr) {
     const auto& operands = instr->operands;
-    int operand_count = instr->info.operand_count - 1; // کم کردن یک از تعداد عملوندها
-    int width = instr->info.operand_width; // 8, 16, 32, 64
+    int operand_count = instr->info.operand_count - 1;
+    int width = instr->info.operand_width;
+
+    int64_t val1 = 0, val2 = 0;
+    uint128_t result = { 0, 0 };
 
     auto read_operand = [&](const ZydisDecodedOperand& op) -> int64_t {
         if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            uint64_t val = 0;
-            if (width == 64) val = get_register_value<uint64_t>(op.reg.value);
-            else if (width == 32) val = get_register_value<uint32_t>(op.reg.value);
-            else if (width == 16) val = get_register_value<uint16_t>(op.reg.value);
-            else if (width == 8)  val = get_register_value<uint8_t>(op.reg.value);
-
             switch (width) {
-            case 8: return static_cast<int8_t>(val);
-            case 16: return static_cast<int16_t>(val);
-            case 32: return static_cast<int32_t>(val);
-            case 64: return static_cast<int64_t>(val);
+            case 8:  return static_cast<int8_t>(get_register_value<uint8_t>(op.reg.value));
+            case 16: return static_cast<int16_t>(get_register_value<uint16_t>(op.reg.value));
+            case 32: return static_cast<int32_t>(get_register_value<uint32_t>(op.reg.value));
+            case 64: return static_cast<int64_t>(get_register_value<uint64_t>(op.reg.value));
             }
         }
         else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-            if (width == 64) {
-                uint64_t v = 0;
-                if (ReadEffectiveMemory(op, &v)) return static_cast<int64_t>(v);
+            switch (width) {
+            case 8: { uint8_t v; ReadEffectiveMemory(op, &v); return static_cast<int8_t>(v); }
+            case 16: { uint16_t v; ReadEffectiveMemory(op, &v); return static_cast<int16_t>(v); }
+            case 32: { uint32_t v; ReadEffectiveMemory(op, &v); return static_cast<int32_t>(v); }
+            case 64: { uint64_t v; ReadEffectiveMemory(op, &v); return static_cast<int64_t>(v); }
             }
-            else if (width == 32) {
-                uint32_t v = 0;
-                if (ReadEffectiveMemory(op, &v)) return static_cast<int32_t>(v);
-            }
-            else if (width == 16) {
-                uint16_t v = 0;
-                if (ReadEffectiveMemory(op, &v)) return static_cast<int16_t>(v);
-            }
-            else if (width == 8) {
-                uint8_t v = 0;
-                if (ReadEffectiveMemory(op, &v)) return static_cast<int8_t>(v);
-            }
-        }
-        else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-            return static_cast<int64_t>(op.imm.value.s);
         }
         return 0;
         };
 
-    auto write_operand = [&](const ZydisDecodedOperand& op, int64_t val) {
-        if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            switch (width) {
-            case 8:
-                set_register_value<uint8_t>(op.reg.value, static_cast<uint8_t>(val));
-                break;
-            case 16:
-                set_register_value<uint16_t>(op.reg.value, static_cast<uint16_t>(val));
-                break;
-            case 32:
-                set_register_value<uint32_t>(op.reg.value, static_cast<uint32_t>(val));
-                break;
-            case 64:
-                set_register_value<uint64_t>(op.reg.value, static_cast<uint64_t>(val));
-                break;
-            }
-        }
-        };
-
-    // بررسی تعداد عملوندها
     if (operand_count == 1) {
-        int64_t val1 = read_operand(operands[0]);
-        int64_t val2 = 0;
-
+        val1 = read_operand(operands[0]);
         switch (width) {
-        case 8: val2 = static_cast<int8_t>(g_regs.rax.l); break;
+        case 8:  val2 = static_cast<int8_t>(g_regs.rax.l); break;
         case 16: val2 = static_cast<int16_t>(g_regs.rax.w); break;
         case 32: val2 = static_cast<int32_t>(g_regs.rax.d); break;
         case 64: val2 = static_cast<int64_t>(g_regs.rax.q); break;
         }
 
-        uint128_t result = mul_64x64_to_128(val1, val2);
+        result = mul_64x64_to_128(val1, val2);
 
-        if (width == 8) {
-            uint16_t res16 = static_cast<uint16_t>(result.low & 0xFFFF);
-            write_operand(operands[0], res16);
-            LOG(L"[+] MUL (1 operand, 8bit) => AX = 0x" << std::hex << res16);
+        switch (width) {
+        case 8:
+            g_regs.rax.w = static_cast<uint16_t>(result.low);
+            break;
+        case 16:
+            g_regs.rax.w = static_cast<uint16_t>(result.low);
+            g_regs.rdx.w = static_cast<uint16_t>(result.low >> 16);
+            break;
+        case 32:
+            g_regs.rax.d = static_cast<uint32_t>(result.low);
+            g_regs.rdx.d = static_cast<uint32_t>(result.high);
+            break;
+        case 64:
+            g_regs.rax.q = result.low;
+            g_regs.rdx.q = result.high;
+            break;
         }
-        else if (width == 16) {
-            uint16_t low = static_cast<uint16_t>(result.low & 0xFFFF);
-            uint16_t high = static_cast<uint16_t>((result.low >> 16) & 0xFFFF);
-            write_operand(operands[0], low);
-            write_operand(operands[1], high);
-            LOG(L"[+] MUL (1 operand, 16bit) => DX:AX = 0x" << std::hex << high << L":" << low);
-        }
-        else if (width == 32) {
-            uint32_t low = static_cast<uint32_t>(result.low & 0xFFFFFFFF);
-            uint32_t high = static_cast<uint32_t>(result.high & 0xFFFFFFFF);
-            write_operand(operands[0], low);
-            write_operand(operands[1], high);
-            LOG(L"[+] MUL (1 operand, 32bit) => EDX:EAX = 0x" << std::hex << high << L":" << low);
-        }
-        else if (width == 64) {
-            uint64_t low = result.low;
-            uint64_t high = result.high;
-            write_operand(operands[0], low);
-            write_operand(operands[1], high);
-            LOG(L"[+] MUL (1 operand, 64bit) => RDX:RAX = 0x" << std::hex << high << L":" << low);
-        }
-    }
-    else if (operand_count == 2) {
-        int64_t val1 = read_operand(operands[0]);
-        int64_t val2 = read_operand(operands[1]);
-        int64_t result = val1 * val2;
 
-        write_operand(operands[0], result);
-        LOG(L"[+] MUL (2 operands) => RESULT = 0x" << std::hex << static_cast<uint64_t>(result));
-    }
-    else if (operand_count == 3) {
-        int64_t val2 = read_operand(operands[1]);
-        int64_t imm = read_operand(operands[2]);
-        int64_t result = val2 * imm;
-        write_operand(operands[0], result);
-        LOG(L"[+] MUL (3 operands) => RESULT = 0x" << std::hex << static_cast<uint64_t>(result));
+        LOG(L"[+] MUL (" << width << L"bit) => RDX:RAX = 0x" << std::hex << result.high << L":" << result.low);
     }
     else {
         LOG(L"[!] Unsupported MUL operand count: " << operand_count);
+        return;
     }
 
-    uint128_t result = { 0, 0 };
-
-    if (operand_count == 1) {
-        result.low = g_regs.rax.q * read_operand(operands[0]);
-    }
-    else if (operand_count == 2) {
-        result.low = read_operand(operands[0]) * read_operand(operands[1]);
-    }
-    else if (operand_count == 3) {
-        result.low = read_operand(operands[1]) * read_operand(operands[2]);
-    }
-
+    // Update flags
+    g_regs.rflags.flags.CF = g_regs.rflags.flags.OF = (result.high != 0);
     g_regs.rflags.flags.ZF = (result.low == 0);
-    g_regs.rflags.flags.SF = ((result.low & (1 << (width * 8 - 1))) != 0);
+    g_regs.rflags.flags.SF = (result.low >> (width - 1)) & 1;
 
-    if (width == 64) {
-        g_regs.rflags.flags.OF = (result.high != 0) && (result.high != 0xFFFFFFFFFFFFFFFFULL);
-    }
-
-    g_regs.rflags.flags.CF = (result.high != 0);  // carry flag
-
-    uint64_t parity_check = result.low & 0xFF;
-    int parity = 0;
-    while (parity_check) {
-        parity ^= (parity_check & 1);
-        parity_check >>= 1;
-    }
-
-    g_regs.rflags.flags.PF = !parity;   // parity flag
-
-    LOG(L"[+] MUL completed with flags updated.");
+    uint8_t lowbyte = result.low & 0xFF;
+    g_regs.rflags.flags.PF = !parity(lowbyte);
 }
 
 void emulate_imul(const ZydisDisassembledInstruction* instr) {
     const auto& operands = instr->operands;
     int operand_count = instr->info.operand_count - 1;
-    int width = instr->info.operand_width; // 8, 16, 32, 64
+    int width = instr->info.operand_width;
+
+    int64_t val1 = 0, val2 = 0, result = 0;
+    uint128_t result128 = { 0, 0 };
 
     auto read_operand = [&](const ZydisDecodedOperand& op) -> int64_t {
         if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            uint64_t val = 0;
-            if (width == 64) val = get_register_value<uint64_t>(op.reg.value);
-            else if (width == 32) val = get_register_value<uint32_t>(op.reg.value);
-            else if (width == 16) val = get_register_value<uint16_t>(op.reg.value);
-            else if (width == 8)  val = get_register_value<uint8_t>(op.reg.value);
-
             switch (width) {
-            case 8: return static_cast<int8_t>(val);
-            case 16: return static_cast<int16_t>(val);
-            case 32: return static_cast<int32_t>(val);
-            case 64: return static_cast<int64_t>(val);
+            case 8:  return static_cast<int8_t>(get_register_value<uint8_t>(op.reg.value));
+            case 16: return static_cast<int16_t>(get_register_value<uint16_t>(op.reg.value));
+            case 32: return static_cast<int32_t>(get_register_value<uint32_t>(op.reg.value));
+            case 64: return static_cast<int64_t>(get_register_value<uint64_t>(op.reg.value));
             }
         }
         else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-            if (width == 64) {
-                uint64_t v = 0;
-                if (ReadEffectiveMemory(op, &v)) return static_cast<int64_t>(v);
-            }
-            else if (width == 32) {
-                uint32_t v = 0;
-                if (ReadEffectiveMemory(op, &v)) return static_cast<int32_t>(v);
-            }
-            else if (width == 16) {
-                uint16_t v = 0;
-                if (ReadEffectiveMemory(op, &v)) return static_cast<int16_t>(v);
-            }
-            else if (width == 8) {
-                uint8_t v = 0;
-                if (ReadEffectiveMemory(op, &v)) return static_cast<int8_t>(v);
+            switch (width) {
+            case 8: { uint8_t v; ReadEffectiveMemory(op, &v); return static_cast<int8_t>(v); }
+            case 16: { uint16_t v; ReadEffectiveMemory(op, &v); return static_cast<int16_t>(v); }
+            case 32: { uint32_t v; ReadEffectiveMemory(op, &v); return static_cast<int32_t>(v); }
+            case 64: { uint64_t v; ReadEffectiveMemory(op, &v); return static_cast<int64_t>(v); }
             }
         }
         else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
@@ -839,116 +743,116 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
         return 0;
         };
 
-    auto write_operand = [&](const ZydisDecodedOperand& op, int64_t val) {
-        if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            switch (width) {
-            case 8:
-                set_register_value<uint8_t>(op.reg.value, static_cast<uint8_t>(val));
-                break;
-            case 16:
-                set_register_value<uint16_t>(op.reg.value, static_cast<uint16_t>(val));
-                break;
-            case 32:
-                set_register_value<uint32_t>(op.reg.value, static_cast<uint32_t>(val));
-                break;
-            case 64:
-                set_register_value<uint64_t>(op.reg.value, static_cast<uint64_t>(val));
-                break;
-            }
-        }
-        };
-
-    // بررسی تعداد عملوندها
     if (operand_count == 1) {
-        int64_t val1 = read_operand(operands[0]);
-        int64_t val2 = 0;
-
+        val1 = read_operand(operands[0]);
         switch (width) {
-        case 8: val2 = static_cast<int8_t>(g_regs.rax.l); break;
+        case 8:  val2 = static_cast<int8_t>(g_regs.rax.l); break;
         case 16: val2 = static_cast<int16_t>(g_regs.rax.w); break;
         case 32: val2 = static_cast<int32_t>(g_regs.rax.d); break;
         case 64: val2 = static_cast<int64_t>(g_regs.rax.q); break;
         }
 
-        uint128_t result = mul_64x64_to_128(val1, val2);
+        result128 = mul_64x64_to_128(val1, val2);
 
-        if (width == 8) {
-            uint16_t res16 = static_cast<uint16_t>(result.low & 0xFFFF);
-            write_operand(operands[0], res16);
-            LOG(L"[+] IMUL (1 operand, 8bit) => AX = 0x" << std::hex << res16);
+        switch (width) {
+        case 8:
+            g_regs.rax.w = static_cast<uint16_t>(result128.low);
+            break;
+        case 16:
+            g_regs.rax.w = static_cast<uint16_t>(result128.low);
+            g_regs.rdx.w = static_cast<uint16_t>(result128.low >> 16);
+            break;
+        case 32:
+            g_regs.rax.d = static_cast<uint32_t>(result128.low);
+            g_regs.rdx.d = static_cast<uint32_t>(result128.high);
+            break;
+        case 64:
+            g_regs.rax.q = result128.low;
+            g_regs.rdx.q = result128.high;
+            break;
         }
-        else if (width == 16) {
-            uint16_t low = static_cast<uint16_t>(result.low & 0xFFFF);
-            uint16_t high = static_cast<uint16_t>((result.low >> 16) & 0xFFFF);
-            write_operand(operands[0], low);
-            write_operand(operands[1], high);
-            LOG(L"[+] IMUL (1 operand, 16bit) => DX:AX = 0x" << std::hex << high << L":" << low);
-        }
-        else if (width == 32) {
-            uint32_t low = static_cast<uint32_t>(result.low & 0xFFFFFFFF);
-            uint32_t high = static_cast<uint32_t>(result.high & 0xFFFFFFFF);
-            write_operand(operands[0], low);
-            write_operand(operands[1], high);
-            LOG(L"[+] IMUL (1 operand, 32bit) => EDX:EAX = 0x" << std::hex << high << L":" << low);
-        }
-        else if (width == 64) {
-            uint64_t low = result.low;
-            uint64_t high = result.high;
-            write_operand(operands[0], low);
-            write_operand(operands[1], high);
-            LOG(L"[+] IMUL (1 operand, 64bit) => RDX:RAX = 0x" << std::hex << high << L":" << low);
-        }
+
+        LOG(L"[+] IMUL (" << width << L"bit) => RDX:RAX = 0x" << std::hex << result128.high << L":" << result128.low);
     }
     else if (operand_count == 2) {
-        int64_t val1 = read_operand(operands[0]);
-        int64_t val2 = read_operand(operands[1]);
-        int64_t result = val1 * val2;
+        val1 = read_operand(operands[0]);
+        val2 = read_operand(operands[1]);
+        result = val1 * val2;
 
-        write_operand(operands[0], result);
-        LOG(L"[+] IMUL (2 operands) => RESULT = 0x" << std::hex << static_cast<uint64_t>(result));
+        switch (width) {
+        case 8:  set_register_value<uint8_t>(operands[0].reg.value, static_cast<uint8_t>(result)); break;
+        case 16: set_register_value<uint16_t>(operands[0].reg.value, static_cast<uint16_t>(result)); break;
+        case 32: set_register_value<uint32_t>(operands[0].reg.value, static_cast<uint32_t>(result)); break;
+        case 64: set_register_value<uint64_t>(operands[0].reg.value, static_cast<uint64_t>(result)); break;
+        }
+
+        LOG(L"[+] IMUL (2 operands) => RESULT = 0x" << std::hex << result);
     }
     else if (operand_count == 3) {
-        int64_t val2 = read_operand(operands[1]);
+        val2 = read_operand(operands[1]);
         int64_t imm = read_operand(operands[2]);
-        int64_t result = val2 * imm;
-        write_operand(operands[0], result);
-        LOG(L"[+] IMUL (3 operands) => RESULT = 0x" << std::hex << static_cast<uint64_t>(result));
+        result = val2 * imm;
+
+        switch (width) {
+        case 8:  set_register_value<uint8_t>(operands[0].reg.value, static_cast<uint8_t>(result)); break;
+        case 16: set_register_value<uint16_t>(operands[0].reg.value, static_cast<uint16_t>(result)); break;
+        case 32: set_register_value<uint32_t>(operands[0].reg.value, static_cast<uint32_t>(result)); break;
+        case 64: set_register_value<uint64_t>(operands[0].reg.value, static_cast<uint64_t>(result)); break;
+        }
+
+        LOG(L"[+] IMUL (3 operands) => RESULT = 0x" << std::hex << result);
     }
     else {
         LOG(L"[!] Unsupported IMUL operand count: " << operand_count);
+        return;
     }
 
-    uint128_t result = { 0, 0 };
+    // ====== FLAGS UPDATE ======
+    bool overflow = false;
+    bool carry = false;
 
     if (operand_count == 1) {
-        result.low = g_regs.rax.q * read_operand(operands[0]);
+        overflow = carry = (width == 64) ? (result128.high != 0) :
+            (width == 32) ? (result128.high != 0) :
+            (width == 16) ? ((result128.low >> 16) != 0) :
+            (width == 8) ? ((result128.low >> 8) != 0) : false;
     }
-    else if (operand_count == 2) {
-        result.low = read_operand(operands[0]) * read_operand(operands[1]);
+    else {
+        int64_t wide_result = (int64_t)val1 * (int64_t)val2;
+
+        switch (width) {
+        case 8:
+            overflow = carry = (wide_result != (int64_t)(int8_t)wide_result);
+            break;
+        case 16:
+            overflow = carry = (wide_result != (int64_t)(int16_t)wide_result);
+            break;
+        case 32:
+            overflow = carry = (wide_result != (int64_t)(int32_t)wide_result);
+            break;
+        case 64:
+            // در این حالت wide_result == result، اما باید بررسی کنیم آیا overflow شده یا نه
+        {
+            auto  wide = val1 * val2;
+            overflow = carry = (wide != (int64_t)wide);
+        }
+        break;
+        }
     }
-    else if (operand_count == 3) {
-        result.low = read_operand(operands[1]) * read_operand(operands[2]);
-    }
 
-    g_regs.rflags.flags.ZF = (result.low == 0);
-    g_regs.rflags.flags.SF = ((result.low & (1 << (width * 8 - 1))) != 0);
+    g_regs.rflags.flags.ZF = (result == 0);
+    g_regs.rflags.flags.SF = ((result & (1 << (width * 8 - 1))) != 0);
 
-    if (width == 64) {
-        g_regs.rflags.flags.OF = (result.high != 0) && (result.high != 0xFFFFFFFFFFFFFFFFULL);
-    }
 
-    g_regs.rflags.flags.CF = (result.high != 0);  // carry flag
+    g_regs.rflags.flags.OF = overflow;
+    
 
-    uint64_t parity_check = result.low & 0xFF;
-    int parity = 0;
-    while (parity_check) {
-        parity ^= (parity_check & 1);
-        parity_check >>= 1;
-    }
+    g_regs.rflags.flags.CF = (result != 0);  
 
-    g_regs.rflags.flags.PF = !parity;   // parity flag
 
-    LOG(L"[+] IMUL completed with flags updated.");
+
+    g_regs.rflags.flags.PF = !parity(result);   // parity flag
+
 }
 
 
@@ -1351,6 +1255,8 @@ void emulate_cmovnbe(const ZydisDisassembledInstruction* instr) {
 void emulate_movsx(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
+    Zydis z;
+
 
     if (dst.type != ZYDIS_OPERAND_TYPE_REGISTER) {
         LOG(L"[!] MOVSX destination must be a register");
@@ -1362,17 +1268,17 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
     // تعیین سایز واقعی operand مبدا در صورت memory
     uint8_t actual_src_size = src.size;
 
-    // اگر سایز غیرواقعی بود، از تفاوت بین اندازه مقصد و دستور حدس بزن
+    // اصلاح اندازه منبع
     if (src.type == ZYDIS_OPERAND_TYPE_MEMORY && (src.size != 1 && src.size != 2 && src.size != 4)) {
         switch (instr->info.operand_width) {
         case 64:
-            actual_src_size = 4; // رایج: movsx rax, dword
+            actual_src_size = 2;  // برای movsx rax, word (2 بایت)
             break;
         case 32:
-            actual_src_size = 1; // رایج: movsx eax, byte
+            actual_src_size = 2;  // برای movsx eax, word (2 بایت)
             break;
         case 16:
-            actual_src_size = 1; // movsx ax, byte
+            actual_src_size = 2;  // برای movsx ax, word (2 بایت)
             break;
         default:
             LOG(L"[!] Unable to infer MOVSX source size");
@@ -1469,8 +1375,6 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
         << L" to " << instr->info.operand_width << L" bits => "
         << ZydisRegisterGetString(dst.reg.value));
 }
-
-
 
 
 void emulate_and(const ZydisDisassembledInstruction* instr) {
@@ -3102,75 +3006,84 @@ void emulate_sub(const ZydisDisassembledInstruction* instr) {
     const auto& src = instr->operands[1];
     const auto width = instr->info.operand_width;
 
-    uint64_t lhs = 0, rhs = 0;
+    int64_t lhs = 0, rhs = 0;  // استفاده از int64_t برای تفریق صحیح علامت‌دار
 
     // Read destination value
     if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
         switch (width) {
-        case 8:  lhs = get_register_value<uint8_t>(dst.reg.value); break;
-        case 16: lhs = get_register_value<uint16_t>(dst.reg.value); break;
-        case 32: lhs = get_register_value<uint32_t>(dst.reg.value); break;
-        case 64: lhs = get_register_value<uint64_t>(dst.reg.value); break;
+        case 8:  lhs = get_register_value<int8_t>(dst.reg.value); break;
+        case 16: lhs = get_register_value<int16_t>(dst.reg.value); break;
+        case 32: lhs = get_register_value<int32_t>(dst.reg.value); break;
+        case 64: lhs = get_register_value<int64_t>(dst.reg.value); break;
         }
     }
     else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
         // Read memory operand (rare for dst in SUB but for completeness)
         switch (width) {
-        case 8: { uint8_t val;  ReadEffectiveMemory(dst, &val); lhs = val; } break;
-        case 16: { uint16_t val; ReadEffectiveMemory(dst, &val); lhs = val; } break;
-        case 32: { uint32_t val; ReadEffectiveMemory(dst, &val); lhs = val; } break;
-        case 64: { uint64_t val; ReadEffectiveMemory(dst, &val); lhs = val; } break;
+        case 8: { int8_t val;  ReadEffectiveMemory(dst, &val); lhs = val; } break;
+        case 16: { int16_t val; ReadEffectiveMemory(dst, &val); lhs = val; } break;
+        case 32: { int32_t val; ReadEffectiveMemory(dst, &val); lhs = val; } break;
+        case 64: { int64_t val; ReadEffectiveMemory(dst, &val); lhs = val; } break;
         }
     }
 
     // Read source value
     if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
         switch (width) {
-        case 8:  rhs = get_register_value<uint8_t>(src.reg.value); break;
-        case 16: rhs = get_register_value<uint16_t>(src.reg.value); break;
-        case 32: rhs = get_register_value<uint32_t>(src.reg.value); break;
-        case 64: rhs = get_register_value<uint64_t>(src.reg.value); break;
+        case 8:  rhs = get_register_value<int8_t>(src.reg.value); break;
+        case 16: rhs = get_register_value<int16_t>(src.reg.value); break;
+        case 32: rhs = get_register_value<int32_t>(src.reg.value); break;
+        case 64: rhs = get_register_value<int64_t>(src.reg.value); break;
         }
     }
     else if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        rhs = src.imm.value.u;
+        rhs = src.imm.value.s;  // استفاده از s برای مقادیر علامت‌دار
     }
     else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
         switch (width) {
-        case 8: { uint8_t val;  ReadEffectiveMemory(src, &val); rhs = val; } break;
-        case 16: { uint16_t val; ReadEffectiveMemory(src, &val); rhs = val; } break;
-        case 32: { uint32_t val; ReadEffectiveMemory(src, &val); rhs = val; } break;
-        case 64: { uint64_t val; ReadEffectiveMemory(src, &val); rhs = val; } break;
+        case 8: { int8_t val;  ReadEffectiveMemory(src, &val); rhs = val; } break;
+        case 16: { int16_t val; ReadEffectiveMemory(src, &val); rhs = val; } break;
+        case 32: { int32_t val; ReadEffectiveMemory(src, &val); rhs = val; } break;
+        case 64: { int64_t val; ReadEffectiveMemory(src, &val); rhs = val; } break;
         }
     }
 
-    // Perform subtraction with masking
+
+
     uint64_t result = lhs - rhs;
-    if (width < 64)
-        result &= (1ULL << width) - 1;
+
+
+
+    // Perform subtraction with masking
+
+
+    // Ensure masking is correctly applied
+    if (width < 64) {
+        result &= (1ULL << width) - 1;  // Apply masking based on operand width
+    }
 
     // Write back the result
     if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
         if (width == 8)
-            set_register_value<uint8_t>(dst.reg.value, static_cast<uint8_t>(result));
+            set_register_value<int8_t>(dst.reg.value, static_cast<int8_t>(result));
         else if (width == 16)
-            set_register_value<uint16_t>(dst.reg.value, static_cast<uint16_t>(result));
+            set_register_value<int16_t>(dst.reg.value, static_cast<int16_t>(result));
         else if (width == 32)
-            set_register_value<uint32_t>(dst.reg.value, static_cast<uint32_t>(result));
+            set_register_value<int32_t>(dst.reg.value, static_cast<int32_t>(result));
         else
-            set_register_value<uint64_t>(dst.reg.value, result);
+            set_register_value<int64_t>(dst.reg.value, result);
     }
     else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
         if (width == 8) {
-            uint8_t val = static_cast<uint8_t>(result);
+            int8_t val = static_cast<int8_t>(result);
             WriteEffectiveMemory(dst, &val);
         }
         else if (width == 16) {
-            uint16_t val = static_cast<uint16_t>(result);
+            int16_t val = static_cast<int16_t>(result);
             WriteEffectiveMemory(dst, &val);
         }
         else if (width == 32) {
-            uint32_t val = static_cast<uint32_t>(result);
+            int32_t val = static_cast<int32_t>(result);
             WriteEffectiveMemory(dst, &val);
         }
         else {
@@ -3181,9 +3094,9 @@ void emulate_sub(const ZydisDisassembledInstruction* instr) {
     // Update flags accurately
     update_flags_sub(result, lhs, rhs, width);
 
+    // Log the result
     LOG(L"[+] SUB => 0x" << std::hex << result);
 }
-
 
 
 void emulate_movzx(const ZydisDisassembledInstruction* instr) {
@@ -3879,73 +3792,71 @@ void start_emulation(uint64_t startAddress) {
     SIZE_T bytesRead = 0;
     Zydis disasm(true);
 
+    //only for debugging purposes
+// DumpRegisters();
+    if (!ReadProcessMemory(hProcess, (LPCVOID)address, buffer, sizeof(buffer), &bytesRead) || bytesRead == 0)
+        exit(0);
+    if (disasm.Disassemble(address, buffer, bytesRead)) {
+        const ZydisDisassembledInstruction* op = disasm.GetInstr();
+        instr = op->info;
+
+        std::string instrText = disasm.InstructionText();
+        LOG(L"0x" << std::hex << disasm.Address()
+            << L": " << std::wstring(instrText.begin(), instrText.end()));
 
 
-    while (true) {
-        //only for debugging purposes
-       // DumpRegisters();
-        if (!ReadProcessMemory(hProcess, (LPCVOID)address, buffer, sizeof(buffer), &bytesRead) || bytesRead == 0)
-            break;
-        if (disasm.Disassemble(address, buffer, bytesRead)) {
-            const ZydisDisassembledInstruction* op = disasm.GetInstr();
-            instr = op->info;
-
-            std::string instrText = disasm.InstructionText();
-            LOG(L"0x" << std::hex << disasm.Address()
-                << L": " << std::wstring(instrText.begin(), instrText.end()));
-
-
-            bool has_lock = (instr.attributes & ZYDIS_ATTRIB_HAS_LOCK) != 0;
-            if (has_lock) {
-                LOG(L"[~] LOCK prefix detected.");
-            }
-            bool has_rep = (instr.attributes & ZYDIS_ATTRIB_HAS_REP) != 0;
-            if (has_rep) {
-                LOG(L"[~] REP prefix detected.");
-            }
-            bool has_VEX = (instr.attributes & ZYDIS_ATTRIB_HAS_VEX) != 0;
-            if (has_VEX) {
-                LOG(L"[~] VEX prefix detected.");
-            }
-
-            no_cheek = 0;
-
-            auto it = dispatch_table.find(instr.mnemonic);
-            if (it != dispatch_table.end()) {
-                it->second(op);
-            }
-            else {
-                std::wcout << L"[!] Instruction not implemented: "
-                    << std::wstring(instrText.begin(), instrText.end()) << std::endl;
-                exit(0);
-            }
-
-            if (!disasm.IsJump() &&
-                instr.mnemonic != ZYDIS_MNEMONIC_CALL &&
-                instr.mnemonic != ZYDIS_MNEMONIC_RET)
-            {
-
-                g_regs.rip += instr.length;
-
-            }
-            else {
-                no_cheek = 1;
-                back_address = address + instr.length;
-            }
-
-            address = g_regs.rip;
-
-
-            StepOverAndEmulate(pi.hProcess, address, pi.hThread);
-
-
+        bool has_lock = (instr.attributes & ZYDIS_ATTRIB_HAS_LOCK) != 0;
+        if (has_lock) {
+            LOG(L"[~] LOCK prefix detected.");
+        }
+        bool has_rep = (instr.attributes & ZYDIS_ATTRIB_HAS_REP) != 0;
+        if (has_rep) {
+            LOG(L"[~] REP prefix detected.");
+        }
+        bool has_VEX = (instr.attributes & ZYDIS_ATTRIB_HAS_VEX) != 0;
+        if (has_VEX) {
+            LOG(L"[~] VEX prefix detected.");
         }
 
+        no_cheek = 0;
+
+        auto it = dispatch_table.find(instr.mnemonic);
+        if (it != dispatch_table.end()) {
+            it->second(op);
+        }
         else {
-            std::wcout << L"Failed to disassemble at address 0x" << std::hex << address << std::endl;
-            break;
+            std::wcout << L"[!] Instruction not implemented: "
+                << std::wstring(instrText.begin(), instrText.end()) << std::endl;
+            exit(0);
         }
+
+        if (!disasm.IsJump() &&
+            instr.mnemonic != ZYDIS_MNEMONIC_CALL &&
+            instr.mnemonic != ZYDIS_MNEMONIC_RET)
+        {
+
+            g_regs.rip += instr.length;
+
+        }
+        else {
+            no_cheek = 1;
+            back_address = address + instr.length;
+        }
+
+        address = g_regs.rip;
+
+
+        StepOverAndEmulate(pi.hProcess, address, pi.hThread);
+
+
     }
+
+    else {
+        std::wcout << L"Failed to disassemble at address 0x" << std::hex << address << std::endl;
+
+    }
+
+
 }
 #else
 void start_emulation(uint64_t startAddress) {
@@ -3956,7 +3867,7 @@ void start_emulation(uint64_t startAddress) {
 
     while (true) {
         //only for debugging purposes
-       // if((g_regs.rip - 0x0007FF75950B370)<0x55)
+       // if((g_regs.rip - 0x1520a33eb)<0x20)
        // DumpRegisters();
         if (!ReadProcessMemory(hProcess, (LPCVOID)address, buffer, sizeof(buffer), &bytesRead) || bytesRead == 0)
             break;
@@ -4111,47 +4022,44 @@ void CompareRFlags(const CONTEXT& ctx) {
     if (g_regs.rflags.flags.CF != ((ctx.EFlags >> 0) & 1)) {
         std::wcout << L"[!] CF mismatch: Emulated=" << g_regs.rflags.flags.CF
             << L", Actual=" << ((ctx.EFlags >> 0) & 1) << std::endl;
+        exit(0);
         
     }
 
     if (g_regs.rflags.flags.PF != ((ctx.EFlags >> 2) & 1)) {
         std::wcout << L"[!] PF mismatch: Emulated=" << g_regs.rflags.flags.PF
             << L", Actual=" << ((ctx.EFlags >> 2) & 1) << std::endl;
+        exit(0);
     }
 
     if (g_regs.rflags.flags.AF != ((ctx.EFlags >> 4) & 1)) {
         std::wcout << L"[!] AF mismatch: Emulated=" << g_regs.rflags.flags.AF
             << L", Actual=" << ((ctx.EFlags >> 4) & 1) << std::endl;
+        exit(0);
     }
 
     if (g_regs.rflags.flags.ZF != ((ctx.EFlags >> 6) & 1)) {
         std::wcout << L"[!] ZF mismatch: Emulated=" << g_regs.rflags.flags.ZF
             << L", Actual=" << ((ctx.EFlags >> 6) & 1) << std::endl;
+        exit(0);
     }
 
     if (g_regs.rflags.flags.SF != ((ctx.EFlags >> 7) & 1)) {
         std::wcout << L"[!] SF mismatch: Emulated=" << g_regs.rflags.flags.SF
             << L", Actual=" << ((ctx.EFlags >> 7) & 1) << std::endl;
-    }
-
-    if (g_regs.rflags.flags.TF != ((ctx.EFlags >> 8) & 1)) {
-        std::wcout << L"[!] TF mismatch: Emulated=" << g_regs.rflags.flags.TF
-            << L", Actual=" << ((ctx.EFlags >> 8) & 1) << std::endl;
-    }
-
-    if (g_regs.rflags.flags.IF != ((ctx.EFlags >> 9) & 1)) {
-        std::wcout << L"[!] IF mismatch: Emulated=" << g_regs.rflags.flags.IF
-            << L", Actual=" << ((ctx.EFlags >> 9) & 1) << std::endl;
+        exit(0);
     }
 
     if (g_regs.rflags.flags.DF != ((ctx.EFlags >> 10) & 1)) {
         std::wcout << L"[!] DF mismatch: Emulated=" << g_regs.rflags.flags.DF
             << L", Actual=" << ((ctx.EFlags >> 10) & 1) << std::endl;
+        exit(0);
     }
 
     if (g_regs.rflags.flags.OF != ((ctx.EFlags >> 11) & 1)) {
         std::wcout << L"[!] OF mismatch: Emulated=" << g_regs.rflags.flags.OF
             << L", Actual=" << ((ctx.EFlags >> 11) & 1) << std::endl;
+        exit(0);
     }
 
 
@@ -4160,12 +4068,10 @@ void CompareRFlags(const CONTEXT& ctx) {
         flags_mismatch = true;
         std::wcout << L"[!] Full RFLAGS mismatch: Emulated=0x" << std::hex << g_regs.rflags.value
             << L", Actual=0x" << std::hex << ctx.EFlags << std::endl;
+
     }
 
 
-    if (flags_mismatch) {
-        exit(0);
-    }
 }
 void CompareRegistersWithEmulation(CONTEXT& ctx) {
 
@@ -4291,18 +4197,6 @@ void CompareRegistersWithEmulation(CONTEXT& ctx) {
     }
 }
 void StepOverAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread) {
-    // Set new breakpoint
-    BYTE origByte;
-    if (!SetBreakpoint(hProcess, newAddress, origByte)) {
-        std::wcout << L"[!]StepOverAndEmulate Failed to set breakpoint at 0x" << std::hex << newAddress << std::endl;
-        exit(0);
-        return;
-    }
-
-    lastBreakpointAddr = newAddress;
-    lastOrigByte = origByte;
-
-    // Save the original context of the thread
     CONTEXT ctx = { 0 };
     ctx.ContextFlags = CONTEXT_FULL;
 
@@ -4311,13 +4205,16 @@ void StepOverAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread) {
         return;
     }
 
-    // Update the thread context with the single step flag if needed
+    // Set Trap Flag (TF) in EFLAGS to enable single-step
+    ctx.EFlags |= 0x100;
+
     if (!SetThreadContext(hThread, &ctx)) {
-        std::wcout << L"[!] Failed to set thread context with single step flag" << std::endl;
+        std::wcout << L"[!] Failed to set thread context with TF" << std::endl;
         return;
     }
 
     ContinueDebugEvent(pi.dwProcessId, GetThreadId(hThread), DBG_CONTINUE);
+
     DEBUG_EVENT dbgEvent;
     while (true) {
         if (!WaitForDebugEvent(&dbgEvent, INFINITE)) break;
@@ -4326,51 +4223,36 @@ void StepOverAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread) {
 
         if (dbgEvent.dwDebugEventCode == EXCEPTION_DEBUG_EVENT) {
             auto& er = dbgEvent.u.Exception.ExceptionRecord;
-            if (er.ExceptionCode == EXCEPTION_BREAKPOINT) {
-                uint64_t exAddr = reinterpret_cast<uint64_t>(er.ExceptionAddress);
-                if (exAddr == newAddress) {
-                    // Remove breakpoint
-                    RemoveBreakpoint(hProcess, newAddress, origByte);
+            if (er.ExceptionCode == EXCEPTION_SINGLE_STEP) {
+                CONTEXT ctxAfter = { 0 };
+                ctxAfter.ContextFlags = CONTEXT_FULL;
 
-                    // Adjust RIP
-                    CONTEXT ctxHit = { 0 };
-                    ctxHit.ContextFlags = CONTEXT_FULL;
-                    if (GetThreadContext(hThread, &ctxHit)) {
-                        ctxHit.Rip -= 1;
-                        SetThreadContext(hThread, &ctxHit);
-
-                        if (no_cheek) {
-                            if (!(g_regs.rip >= startaddr && g_regs.rip <= endaddr)) {
-                                // uint64_t value = 0;
-                               //  ReadMemory(g_regs.rsp.q, &value, 8);
-                                LOG("set brack point on : " << std::hex << back_address);
-                                SetSingleBreakpointAndEmulate(pi.hProcess, back_address, pi.hThread);
-                            }
-                        }
-                        else {
-                        CompareRegistersWithEmulation(ctxHit);
-                        }
-
-
-
-
-
-                    }
-
-                    // Emulate from breakpoint address
-                    start_emulation(exAddr);
+                if (!GetThreadContext(hThread, &ctxAfter)) {
+                    std::wcout << L"[!] Failed to get context after single-step" << std::endl;
                     break;
                 }
+
+
+
+                if (!no_cheek) {
+                    CompareRegistersWithEmulation(ctxAfter);
+                }
+                // Emulate the instruction at current RIP
+                start_emulation(ctxAfter.Rip);
+                break;
+            }
+            else {
+                std::wcout << L"[!] Unexpected exception code: 0x" << std::hex << er.ExceptionCode << std::endl;
+                break;
             }
         }
         else {
-            exit(0);
+            std::wcout << L"[!] Unexpected debug event code: " << dbgEvent.dwDebugEventCode << std::endl;
+            break;
         }
-
     }
-
-
 }
+
 #endif
 
 
@@ -4688,7 +4570,7 @@ int wmain(int argc, wchar_t* argv[]) {
                     g_regs.r15.q = ctx.R15;
                     g_regs.rip = ctx.Rip;
                     g_regs.rflags.value = ctx.EFlags;
-                    g_regs.rflags.flags.TF = 0;
+
 
                     memcpy(g_regs.ymm[0].xmm, &ctx.Xmm0, 16);
                     memcpy(g_regs.ymm[1].xmm, &ctx.Xmm1, 16);

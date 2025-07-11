@@ -7,7 +7,7 @@ if(MSVC)
     set_source_files_properties(xgetbv.asm PROPERTIES LANGUAGE ASM_MASM)
 endif()
 
-add_executable(My_CPU "My_CPU.cpp" "xgetbv.asm")
+add_executable(My_CPU "My_CPU.cpp" "asm_function.asm")
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
     set_property(TARGET My_CPU PROPERTY CXX_STANDARD 20)
