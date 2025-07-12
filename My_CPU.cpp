@@ -18,7 +18,7 @@ uint64_t startaddr, endaddr;
 uint64_t lastBreakpointAddr = 0;
 BYTE lastOrigByte = 0;
 PROCESS_INFORMATION pi;
-
+bool has_rep;
 #define LOG_ENABLED 1
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
@@ -29,9 +29,44 @@ PROCESS_INFORMATION pi;
 #define DB_ENABLED 0
 
 #if DB_ENABLED
-void StepOverAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread);
+uint64_t my_breakpoint ;
+bool file_exists_next_to_exe(const std::string& filename = "1.txt") {
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
+    std::filesystem::path filePath = exeDir / filename;
+
+    return std::filesystem::exists(filePath);
+}
+void write_breakpoint_to_file(uint64_t my_breakpoint) {
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
+    std::filesystem::path filePath = exeDir / "1.txt";
+
+    std::ofstream file(filePath, std::ios::out | std::ios::trunc);
+    if (file.is_open()) {
+        file << my_breakpoint;
+        file.close();
+    }
+}
+uint64_t read_breakpoint_from_file() {
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
+    std::filesystem::path filePath = exeDir / "1.txt";
+
+    std::ifstream file(filePath);
+    uint64_t value = 0;
+    if (file.is_open()) {
+        file >> value;
+        file.close();
+    }
+    return value;
+}
+void StepOverAndEmulate(HANDLE hProcess, HANDLE hThread);
 void CompareRegistersWithEmulation(CONTEXT& ctx);
-bool no_cheek;
+bool no_cheek,cpuid;
 uint64_t back_address;
 #endif
 
@@ -839,18 +874,34 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
         break;
         }
     }
-
-    g_regs.rflags.flags.ZF = (result == 0);
+    if (operand_count == 1)
+        g_regs.rflags.flags.ZF = (result == 0);
+    else
+         g_regs.rflags.flags.ZF = 0;
     g_regs.rflags.flags.SF = ((result & (1 << (width * 8 - 1))) != 0);
 
 
     g_regs.rflags.flags.OF = overflow;
     
 
-    g_regs.rflags.flags.CF = (result != 0);  
+    if (operand_count == 1) {
+        g_regs.rflags.flags.CF = g_regs.rflags.flags.OF = overflow;
+    }
+    else {
+        int64_t min_val = 0, max_val = 0;
+        switch (width) {
+        case 8:  min_val = INT8_MIN;  max_val = INT8_MAX;  break;
+        case 16: min_val = INT16_MIN; max_val = INT16_MAX; break;
+        case 32: min_val = INT32_MIN; max_val = INT32_MAX; break;
+        case 64: min_val = INT64_MIN; max_val = INT64_MAX; break;
+        }
+
+        bool overflow_occurred = (result < min_val) || (result > max_val);
+        g_regs.rflags.flags.CF = g_regs.rflags.flags.OF = overflow_occurred;
+    }
 
 
-
+    g_regs.rflags.flags.AF = 0;
     g_regs.rflags.flags.PF = !parity(result);   // parity flag
 
 }
@@ -2604,45 +2655,39 @@ void emulate_movups(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_stosw(const ZydisDisassembledInstruction* instr) {
-
-    uint64_t count = 0;
-    if (instr->info.operand_width == 16)
-        count = g_regs.rcx.w;  // CX
-    else if (instr->info.operand_width == 32)
-        count = g_regs.rcx.d;  // ECX
-    else
-        count = g_regs.rcx.q;  // RCX
+    uint64_t count = has_rep ? (
+        instr->info.operand_width == 16 ? g_regs.rcx.w :
+        instr->info.operand_width == 32 ? g_regs.rcx.d :
+        g_regs.rcx.q) : 1;
 
     uint16_t value = g_regs.rax.w;  // AX
-
-
     uint64_t dest = g_regs.rdi.q;
-
-
     int delta = g_regs.rflags.flags.DF ? -2 : 2;
 
-    for (uint64_t i = 0; i < count; i++) {
-
-        if (!WriteMemory(dest, &value, 16)) {
-            LOG(L"[!] Failed to write memory in rep stosw");
+    for (uint64_t i = 0; i < count; ++i) {
+        if (!WriteMemory(dest, &value, sizeof(uint16_t))) {
+            LOG(L"[!] Failed to write memory in STOSW at 0x" << std::hex << dest);
             break;
         }
+
+        LOG(L"[+] STOSW: Wrote 0x" << std::hex << value << L" to [RDI] = 0x" << dest);
 
         dest += delta;
     }
 
-
     g_regs.rdi.q = dest;
 
+    if (has_rep) {
+        if (instr->info.operand_width == 16)
+            g_regs.rcx.w = 0;
+        else if (instr->info.operand_width == 32)
+            g_regs.rcx.d = 0;
+        else
+            g_regs.rcx.q = 0;
+    }
 
-    if (instr->info.operand_width == 16)
-        g_regs.rcx.w = 0;
-    else if (instr->info.operand_width == 32)
-        g_regs.rcx.d = 0;
-    else
-        g_regs.rcx.q = 0;
+    LOG(L"[+] STOSW: Final RDI = 0x" << std::hex << g_regs.rdi.q);
 }
-
 
 void emulate_punpcklqdq(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -2915,91 +2960,96 @@ void emulate_movdqa(const ZydisDisassembledInstruction* instr) {
 
 void emulate_mov(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
-    uint8_t width = instr->info.operand_width; // bit width: 8,16,32,64
+    uint8_t width = instr->info.operand_width; // 8, 16, 32, 64
 
     auto zero_extend = [](uint64_t val, uint8_t bits) -> uint64_t {
-        uint64_t mask = (bits < 64) ? ((1ULL << bits) - 1) : ~0ULL;
-        return val & mask;
+        if (bits >= 64) return val;
+        return val & ((1ULL << bits) - 1);
         };
 
-    // MOV with immediate value
+    auto write_register = [&](ZydisRegister reg, uint64_t val) {
+        switch (width) {
+        case 8:
+            set_register_value<uint8_t>(reg, static_cast<uint8_t>(val));
+            break;
+        case 16:
+            set_register_value<uint16_t>(reg, static_cast<uint16_t>(val));
+            break;
+        case 32:
+
+            set_register_value<uint64_t>(reg, static_cast<uint32_t>(val)); 
+            break;
+        case 64:
+            set_register_value<uint64_t>(reg, static_cast<uint64_t>(val));
+            break;
+        }
+        };
+
+
+    auto read_register = [&](ZydisRegister reg) -> uint64_t {
+        switch (width) {
+        case 8:
+            return get_register_value<uint8_t>(reg);
+        case 16:
+            return get_register_value<uint16_t>(reg);
+        case 32:
+            return get_register_value<uint32_t>(reg);
+        case 64:
+            return get_register_value<uint64_t>(reg);
+        default:
+            return 0;
+        }
+        };
+
     if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
         uint64_t val = zero_extend(static_cast<uint64_t>(src.imm.value.u), width);
-        set_register_value<uint64_t>(dst.reg.value, val);
+        write_register(dst.reg.value, val);
     }
-    // MOV between two registers
     else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        uint64_t value = get_register_value<uint64_t>(src.reg.value);
-        value = zero_extend(value, width);
-        set_register_value<uint64_t>(dst.reg.value, value);
+        uint64_t val = read_register(src.reg.value);
+        write_register(dst.reg.value, val);
     }
-    // MOV from memory to register
     else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (width == 64) {
-            uint64_t value;
-            if (ReadEffectiveMemory(src, &value)) {
-                set_register_value<uint64_t>(dst.reg.value, value);
-            }
+        uint64_t val = 0;
+        switch (width) {
+        case 8: {
+            uint8_t tmp; if (ReadEffectiveMemory(src, &tmp)) val = tmp; break;
         }
-        else if (width == 32) {
-            uint32_t value;
-            if (ReadEffectiveMemory(src, &value)) {
-                uint64_t val64 = zero_extend(value, 32);
-                set_register_value<uint64_t>(dst.reg.value, val64);
-            }
+        case 16: {
+            uint16_t tmp; if (ReadEffectiveMemory(src, &tmp)) val = tmp; break;
         }
-        else if (width == 16) {
-            uint16_t value;
-            if (ReadEffectiveMemory(src, &value)) {
-                uint64_t val64 = zero_extend(value, 16);
-                set_register_value<uint64_t>(dst.reg.value, val64);
-            }
+        case 32: {
+            uint32_t tmp; if (ReadEffectiveMemory(src, &tmp)) val = tmp; break;
         }
-        else if (width == 8) {
-            uint8_t value;
-            if (ReadEffectiveMemory(src, &value)) {
-                uint64_t val64 = zero_extend(value, 8);
-                set_register_value<uint64_t>(dst.reg.value, val64);
-            }
+        case 64: {
+            uint64_t tmp; if (ReadEffectiveMemory(src, &tmp)) val = tmp; break;
         }
+        }
+        write_register(dst.reg.value, val);
     }
-    // MOV from register to memory
     else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        uint64_t value = get_register_value<uint64_t>(src.reg.value);
-        uint64_t val = zero_extend(value, width);
-        if (width == 64) {
-            WriteEffectiveMemory(dst, val);
-        }
-        else if (width == 32) {
-            WriteEffectiveMemory(dst, static_cast<uint32_t>(val));
-        }
-        else if (width == 16) {
-            WriteEffectiveMemory(dst, static_cast<uint16_t>(val));
-        }
-        else if (width == 8) {
-            WriteEffectiveMemory(dst, static_cast<uint8_t>(val));
+        uint64_t val = read_register(src.reg.value);
+        switch (width) {
+        case 8:  WriteEffectiveMemory(dst, static_cast<uint8_t>(val)); break;
+        case 16: WriteEffectiveMemory(dst, static_cast<uint16_t>(val)); break;
+        case 32: WriteEffectiveMemory(dst, static_cast<uint32_t>(val)); break;
+        case 64: WriteEffectiveMemory(dst, static_cast<uint64_t>(val)); break;
         }
     }
-    // MOV with immediate to memory
     else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        uint64_t val = zero_extend(src.imm.value.u, width);
-        if (width == 64) {
-            WriteEffectiveMemory(dst, val);
-        }
-        else if (width == 32) {
-            WriteEffectiveMemory(dst, static_cast<uint32_t>(val));
-        }
-        else if (width == 16) {
-            WriteEffectiveMemory(dst, static_cast<uint16_t>(val));
-        }
-        else if (width == 8) {
-            WriteEffectiveMemory(dst, static_cast<uint8_t>(val));
+        uint64_t val = zero_extend(static_cast<uint64_t>(src.imm.value.u), width);
+        switch (width) {
+        case 8:  WriteEffectiveMemory(dst, static_cast<uint8_t>(val)); break;
+        case 16: WriteEffectiveMemory(dst, static_cast<uint16_t>(val)); break;
+        case 32: WriteEffectiveMemory(dst, static_cast<uint32_t>(val)); break;
+        case 64: WriteEffectiveMemory(dst, static_cast<uint64_t>(val)); break;
         }
     }
     else {
         LOG(L"[!] Unsupported MOV instruction");
     }
 }
+
 
 void emulate_sub(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -3320,20 +3370,28 @@ void emulate_shr(const ZydisDisassembledInstruction* instr) {
 void emulate_stosb(const ZydisDisassembledInstruction* instr) {
     uint8_t al_val = static_cast<uint8_t>(g_regs.rax.l);
     uint64_t dest = g_regs.rdi.q;
+    uint64_t count = has_rep ? g_regs.rcx.q : 1;
+    int delta = (g_regs.rflags.flags.DF) ? -1 : 1;
 
-    if (!WriteMemory(dest, &al_val, sizeof(uint8_t))) {
-        LOG(L"[!] STOSB: Failed to write memory at 0x" << std::hex << dest);
-        return;
+    for (uint64_t i = 0; i < count; ++i) {
+        if (!WriteMemory(dest, &al_val, sizeof(uint8_t))) {
+            LOG(L"[!] STOSB: Failed to write memory at 0x" << std::hex << dest);
+            return;
+        }
+
+        LOG(L"[+] STOSB: Wrote 0x" << std::hex << static_cast<int>(al_val)
+            << L" to [RDI] = 0x" << dest);
+
+        dest += delta;
     }
 
-    LOG(L"[+] STOSB: Wrote 0x" << std::hex << static_cast<int>(al_val)
-        << L" to [RDI] = 0x" << dest);
+    g_regs.rdi.q = dest;
 
+    if (has_rep) {
+        g_regs.rcx.q = 0;
+    }
 
-    int delta = (g_regs.rflags.flags.DF) ? -1 : 1;
-    g_regs.rdi.q += delta;
-
-    LOG(L"[+] STOSB: RDI updated to 0x" << std::hex << g_regs.rdi.q);
+    LOG(L"[+] STOSB: Final RDI = 0x" << std::hex << g_regs.rdi.q);
 }
 
 
@@ -3384,7 +3442,7 @@ void emulate_sar(const ZydisDisassembledInstruction* instr) {
 
 void emulate_cpuid(const ZydisDisassembledInstruction*) {
 #if DB_ENABLED
-    no_cheek = 1;
+    cpuid = 1;
 #endif
     int cpu_info[4];
     int input_eax = static_cast<int>(g_regs.rax.q);
@@ -3459,7 +3517,7 @@ void emulate_test(const ZydisDisassembledInstruction* instr) {
 
     g_regs.rflags.flags.CF = 0;
     g_regs.rflags.flags.OF = 0;
-    g_regs.rflags.flags.AF = ((lhs ^ rhs ^ result) >> 4) & 1;
+    g_regs.rflags.flags.AF =0;
 
     LOG(L"[+] TEST => 0x" << std::hex << lhs << L" & 0x" << rhs);
     LOG(L"[+] Flags after TEST: ZF=" << g_regs.rflags.flags.ZF
@@ -3805,19 +3863,27 @@ void emulate_setz(const ZydisDisassembledInstruction* instr) {
 void emulate_stosd(const ZydisDisassembledInstruction* instr) {
     uint32_t eax_val = static_cast<uint32_t>(g_regs.rax.d);
     uint64_t dest = g_regs.rdi.q;
+    uint64_t count = has_rep ? g_regs.rcx.q : 1;  // REPZ/STOSD relies on RCX
+    int delta = (g_regs.rflags.flags.DF) ? -4 : 4;
 
-    if (!WriteMemory(dest, &eax_val, sizeof(uint32_t))) {
-        LOG(L"[!] STOSD: Failed to write memory at 0x" << std::hex << dest);
-        return;
+    for (uint64_t i = 0; i < count; ++i) {
+        if (!WriteMemory(dest, &eax_val, sizeof(uint32_t))) {
+            LOG(L"[!] STOSD: Failed to write memory at 0x" << std::hex << dest);
+            return;
+        }
+
+        //LOG(L"[+] STOSD: Wrote 0x" << std::hex << eax_val << L" to [RDI] = 0x" << dest);
+
+        dest += delta;
     }
 
-    LOG(L"[+] STOSD: Wrote 0x" << std::hex << eax_val << L" to [RDI] = 0x" << dest);
+    g_regs.rdi.q = dest;
 
-    // Adjust EDI based on Direction Flag (DF)
-    int delta = (g_regs.rflags.flags.DF) ? -4 : 4;
-    g_regs.rdi.q += delta;
+    if (has_rep) {
+        g_regs.rcx.q = 0; // After REP instruction RCX is zero
+    }
 
-    LOG(L"[+] STOSD: RDI updated to 0x" << std::hex << g_regs.rdi.q);
+    LOG(L"[+] STOSD: Final RDI = 0x" << std::hex << g_regs.rdi.q);
 }
 
 
@@ -3846,7 +3912,7 @@ void start_emulation(uint64_t startAddress) {
         if (has_lock) {
             LOG(L"[~] LOCK prefix detected.");
         }
-        bool has_rep = (instr.attributes & ZYDIS_ATTRIB_HAS_REP) != 0;
+         has_rep = (instr.attributes & ZYDIS_ATTRIB_HAS_REP) != 0;
         if (has_rep) {
             LOG(L"[~] REP prefix detected.");
         }
@@ -3856,6 +3922,8 @@ void start_emulation(uint64_t startAddress) {
         }
 
         no_cheek = 0;
+        cpuid = 0;
+        back_address = 0;
 
         auto it = dispatch_table.find(instr.mnemonic);
         if (it != dispatch_table.end()) {
@@ -3877,13 +3945,34 @@ void start_emulation(uint64_t startAddress) {
         }
         else {
             no_cheek = 1;
-            back_address = address + instr.length;
+                    LOG("addr : "<<  std::hex << address << " rip : " << std::hex << g_regs.rip);
+            if (!(g_regs.rip >= startaddr && g_regs.rip <= endaddr)) {
+                if ((address >= startaddr && address <= endaddr)) {
+                    if (disasm.IsJump()) {
+                        ReadMemory(g_regs.rsp.q, &back_address, 8);
+                    }
+                    else {
+                    back_address = address + instr.length;
+                    }
+
+                }
+                else {
+                    ReadMemory(g_regs.rsp.q, &back_address, 8);
+                }
+
+            }
+            else {
+                back_address = g_regs.rip;
+            }
+
         }
 
         address = g_regs.rip;
+        if (file_exists_next_to_exe) {
+            write_breakpoint_to_file(g_regs.rip);
+        }
 
-
-        StepOverAndEmulate(pi.hProcess, address, pi.hThread);
+        StepOverAndEmulate(pi.hProcess, pi.hThread);
 
 
     }
@@ -3921,10 +4010,10 @@ void start_emulation(uint64_t startAddress) {
             if (has_lock) {
                 LOG(L"[~] LOCK prefix detected.");
             }
-            bool has_rep = (instr.attributes & ZYDIS_ATTRIB_HAS_REP) != 0;
+             has_rep = (instr.attributes & ZYDIS_ATTRIB_HAS_REP) != 0;
             if (has_rep) {
                 LOG(L"[~] REP prefix detected.");
-                exit(0);
+               // exit(0);
             }
             bool has_VEX = (instr.attributes & ZYDIS_ATTRIB_HAS_VEX) != 0;
             if (has_VEX) {
@@ -4234,7 +4323,7 @@ void CompareRegistersWithEmulation(CONTEXT& ctx) {
         }
     }
 }
-void StepOverAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread) {
+void StepOverAndEmulate(HANDLE hProcess, HANDLE hThread) {
     CONTEXT ctx = { 0 };
     ctx.ContextFlags = CONTEXT_FULL;
 
@@ -4269,14 +4358,23 @@ void StepOverAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread) {
                     std::wcout << L"[!] Failed to get context after single-step" << std::endl;
                     break;
                 }
+                if (has_rep && ctxAfter.Rip != g_regs.rip) {
 
-
-
-                if (!no_cheek) {
-                    CompareRegistersWithEmulation(ctxAfter);
+                    StepOverAndEmulate(pi.hProcess, pi.hThread);
+                    break;
                 }
-                // Emulate the instruction at current RIP
-                start_emulation(ctxAfter.Rip);
+
+
+                if (!no_cheek && !cpuid) {
+                    CompareRegistersWithEmulation(ctxAfter);
+                    start_emulation(ctxAfter.Rip);
+                }
+                if (cpuid){
+                    start_emulation(ctxAfter.Rip);
+                }
+                if (no_cheek) {
+                    SetSingleBreakpointAndEmulate(pi.hProcess, back_address, pi.hThread);
+                }
                 break;
             }
             else {
@@ -4549,7 +4647,12 @@ int wmain(int argc, wchar_t* argv[]) {
 
     STARTUPINFOW si = { sizeof(si) };
     uint32_t entryRVA = GetEntryPointRVA(exePath);
-    auto tlsRVAs = GetTLSCallbackRVAs(exePath);
+    std::vector<uint32_t> tlsRVAs = GetTLSCallbackRVAs(exePath);
+#if DB_ENABLED
+    if (file_exists_next_to_exe) {
+        my_breakpoint =  read_breakpoint_from_file();
+    }
+#endif
     if (!CreateProcessW(exePath.c_str(), NULL, NULL, NULL, FALSE, DEBUG_ONLY_THIS_PROCESS, NULL, NULL, &si, &pi)) return 1;
     DEBUG_EVENT dbgEvent = {};
     uint64_t baseAddress = 0;
@@ -4563,16 +4666,37 @@ int wmain(int argc, wchar_t* argv[]) {
             baseAddress = reinterpret_cast<uint64_t>(dbgEvent.u.CreateProcessInfo.lpBaseOfImage);
             endaddr = baseAddress + optionalHeader.SizeOfImage;
             startaddr = baseAddress;
-            if (entryRVA) {
-                BYTE orig;
-                uint64_t addr = baseAddress + entryRVA;
-                if (SetBreakpoint(pi.hProcess, addr, orig)) breakpoints[addr] = orig;
+            BYTE orig;
+            #if DB_ENABLED
+            if (my_breakpoint) {
+                        if (SetBreakpoint(pi.hProcess, my_breakpoint, orig)) breakpoints[my_breakpoint] = orig;
             }
-            for (uint32_t rva : tlsRVAs) {
-                BYTE orig;
-                uint64_t addr = baseAddress + rva;
-                if (SetBreakpoint(pi.hProcess, addr, orig)) breakpoints[addr] = orig;
+            else {
+                if (entryRVA) {
+
+                    uint64_t addr = baseAddress + entryRVA;
+                    if (SetBreakpoint(pi.hProcess, addr, orig)) breakpoints[addr] = orig;
+                }
+                for (uint32_t rva : tlsRVAs) {
+
+                    uint64_t addr = baseAddress + rva;
+                    if (SetBreakpoint(pi.hProcess, addr, orig)) breakpoints[addr] = orig;
+                }
             }
+
+            #else
+                        if (entryRVA) {
+
+                            uint64_t addr = baseAddress + entryRVA;
+                            if (SetBreakpoint(pi.hProcess, addr, orig)) breakpoints[addr] = orig;
+                        }
+                        for (uint32_t rva : tlsRVAs) {
+
+                            uint64_t addr = baseAddress + rva;
+                            if (SetBreakpoint(pi.hProcess, addr, orig)) breakpoints[addr] = orig;
+                        }
+            #endif
+
             break;
         }
         case EXCEPTION_DEBUG_EVENT: {
