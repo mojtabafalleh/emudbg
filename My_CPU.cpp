@@ -6,8 +6,11 @@
 #include <string>
 #include <filesystem>
 #include <cstdint>
-#include "zydis_wrapper.h"
+#include "deps/zydis_wrapper.h"
 #include <tlhelp32.h>
+
+
+
 
 void DumpRegisters();
 void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread);
@@ -19,55 +22,11 @@ uint64_t lastBreakpointAddr = 0;
 BYTE lastOrigByte = 0;
 PROCESS_INFORMATION pi;
 bool has_rep;
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
 #define LOG(x)
-#endif
-
-#define DB_ENABLED 0
-
-#if DB_ENABLED
-uint64_t my_breakpoint ;
-bool file_exists_next_to_exe(const std::string& filename = "1.txt") {
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
-    std::filesystem::path filePath = exeDir / filename;
-
-    return std::filesystem::exists(filePath);
-}
-void write_breakpoint_to_file(uint64_t my_breakpoint) {
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
-    std::filesystem::path filePath = exeDir / "1.txt";
-
-    std::ofstream file(filePath, std::ios::out | std::ios::trunc);
-    if (file.is_open()) {
-        file << my_breakpoint;
-        file.close();
-    }
-}
-uint64_t read_breakpoint_from_file() {
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
-    std::filesystem::path filePath = exeDir / "1.txt";
-
-    std::ifstream file(filePath);
-    uint64_t value = 0;
-    if (file.is_open()) {
-        file >> value;
-        file.close();
-    }
-    return value;
-}
-void StepOverAndEmulate(HANDLE hProcess, HANDLE hThread);
-void CompareRegistersWithEmulation(CONTEXT& ctx);
-bool no_cheek,cpuid;
-uint64_t back_address;
 #endif
 
 typedef enum _THREADINFOCLASS {
@@ -151,6 +110,229 @@ struct RegState {
     uint64_t fs_base;
 } g_regs;
 //----------------------- MATH ------------------------------
+#define TEST_WITH_UNICORN_ENABLED 0
+#if TEST_WITH_UNICORN_ENABLED
+#include <unicorn/unicorn.h>
+uc_engine* unicorn;
+void LoadAllMemoryRegionsToUnicorn(uc_engine* unicorn) {
+  
+
+    struct {
+        int id;
+        uint64_t val;
+    } reg_map[] = {
+        { UC_X86_REG_RAX, g_regs.rax.q },
+        { UC_X86_REG_RBX, g_regs.rbx.q },
+        { UC_X86_REG_RCX, g_regs.rcx.q },
+        { UC_X86_REG_RDX, g_regs.rdx.q },
+        { UC_X86_REG_RSI, g_regs.rsi.q },
+        { UC_X86_REG_RDI, g_regs.rdi.q },
+        { UC_X86_REG_RBP, g_regs.rbp.q },
+        { UC_X86_REG_RSP, g_regs.rsp.q },
+        { UC_X86_REG_RIP, g_regs.rip},
+        { UC_X86_REG_R8, g_regs.r8.q },
+        { UC_X86_REG_R9, g_regs.r9.q },
+        { UC_X86_REG_R10, g_regs.r10.q },
+        { UC_X86_REG_R11, g_regs.r11.q },
+        { UC_X86_REG_R12, g_regs.r12.q },
+        { UC_X86_REG_R13, g_regs.r13.q },
+        { UC_X86_REG_R14, g_regs.r14.q },
+        { UC_X86_REG_R15, g_regs.r15.q },
+        { UC_X86_REG_RFLAGS, g_regs.rflags.value }
+    };
+    for (auto& r : reg_map) {
+        uc_reg_write(unicorn, r.id, &r.val);
+    }
+
+
+    uc_reg_write(unicorn, UC_X86_REG_GS_BASE, &g_regs.gs_base);
+
+}
+bool MapSingleMemoryPageToUnicorn(uc_engine* unicorn, uint64_t address) {
+    constexpr size_t pageSize = 0x1000;
+    uint64_t pageBase = address & ~(pageSize - 1);
+
+    MEMORY_BASIC_INFORMATION mbi{};
+    SIZE_T result = VirtualQueryEx(pi.hProcess, reinterpret_cast<LPCVOID>(pageBase), &mbi, sizeof(mbi));
+    if (result != sizeof(mbi)) {
+
+        return false;
+    }
+
+    DWORD prot = mbi.Protect;
+
+
+
+    // Determine UC protection flags
+    auto GetUnicornProtection = [](DWORD protect) -> int {
+        int flags = UC_PROT_READ;
+        if (protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))
+            flags |= UC_PROT_EXEC;
+        if (protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))
+            flags |= UC_PROT_WRITE;
+        return flags;
+        };
+
+    bool readable = (prot & PAGE_READONLY) || (prot & PAGE_READWRITE) ||
+        (prot & PAGE_EXECUTE_READ) || (prot & PAGE_EXECUTE_READWRITE);
+
+    if ((prot & PAGE_GUARD) || prot == PAGE_NOACCESS || !(mbi.State == MEM_COMMIT && readable)) {
+
+
+        std::vector<uint8_t> buffer(pageSize, 0);
+        SIZE_T bytesRead = 0;
+        if (ReadProcessMemory(pi.hProcess, reinterpret_cast<LPCVOID>(pageBase), buffer.data(), pageSize, &bytesRead) && bytesRead > 0) {
+
+
+            int ucProt = GetUnicornProtection(prot);
+
+            uc_err err = uc_mem_map(unicorn, pageBase, pageSize, ucProt);
+            if (err != UC_ERR_OK) {
+
+                return false;
+            }
+
+            uc_mem_write(unicorn, pageBase, buffer.data(), bytesRead);
+
+
+            return true;
+        }
+        else {
+
+            return false;
+        }
+    }
+
+    // Standard case - fully accessible memory
+    std::vector<uint8_t> buffer(pageSize);
+    SIZE_T bytesRead = 0;
+    if (!ReadProcessMemory(pi.hProcess, reinterpret_cast<LPCVOID>(pageBase), buffer.data(), pageSize, &bytesRead) || bytesRead == 0) {
+        return false;
+    }
+
+
+
+    int ucProt = GetUnicornProtection(prot);
+
+
+    uc_err err = uc_mem_map(unicorn, pageBase, pageSize, ucProt);
+    if (err != UC_ERR_OK) {
+        return false;
+    }
+
+    uc_mem_write(unicorn, pageBase, buffer.data(), bytesRead);
+
+
+
+    return true;
+}
+bool hook_mem_invalid(uc_engine* uc, uc_mem_type type, uint64_t address,
+    int size, int64_t value, void* user_data) {
+
+    uint64_t pageStart = address & ~0xFFF;
+
+    if (!MapSingleMemoryPageToUnicorn(uc, pageStart)) {
+        return false;  // do not retry access
+    }
+
+    return true;  // retry memory access
+}
+void check_registers(uc_engine* uc) {
+
+    struct {
+        uc_x86_reg uc_reg;
+        uint64_t gpr_val;
+        const char* name;
+    } gpr_regs[] = {
+        { UC_X86_REG_RAX, g_regs.rax.q, "RAX" },
+        { UC_X86_REG_RBX, g_regs.rbx.q, "RBX" },
+        { UC_X86_REG_RCX, g_regs.rcx.q, "RCX" },
+        { UC_X86_REG_RDX, g_regs.rdx.q, "RDX" },
+        { UC_X86_REG_RSI, g_regs.rsi.q, "RSI" },
+        { UC_X86_REG_RDI, g_regs.rdi.q, "RDI" },
+        { UC_X86_REG_RBP, g_regs.rbp.q, "RBP" },
+        { UC_X86_REG_RSP, g_regs.rsp.q, "RSP" },
+        { UC_X86_REG_R8,  g_regs.r8.q,  "R8"  },
+        { UC_X86_REG_R9,  g_regs.r9.q,  "R9"  },
+        { UC_X86_REG_R10, g_regs.r10.q, "R10" },
+        { UC_X86_REG_R11, g_regs.r11.q, "R11" },
+        { UC_X86_REG_R12, g_regs.r12.q, "R12" },
+        { UC_X86_REG_R13, g_regs.r13.q, "R13" },
+        { UC_X86_REG_R14, g_regs.r14.q, "R14" },
+        { UC_X86_REG_R15, g_regs.r15.q, "R15" },
+    };
+
+    for (auto& reg : gpr_regs) {
+        uint64_t val = 0;
+        uc_reg_read(uc, reg.uc_reg, &val);
+        if (val != reg.gpr_val) {
+            fprintf(stderr, "Mismatch in %s: expected 0x%llx, got 0x%llx {RIP : 0x%llx}\n",
+                reg.name, reg.gpr_val, val,g_regs.rip);
+            exit(1);
+        }
+    }
+
+    // RIP
+    uint64_t rip = 0;
+    uc_reg_read(uc, UC_X86_REG_RIP, &rip);
+    if (rip != g_regs.rip) {
+        fprintf(stderr, "Mismatch in RIP: expected 0x%llx, got 0x%llx\n", g_regs.rip, rip);
+        exit(1);
+    }
+
+    // RFLAGS
+    uint64_t rflags = 0;
+    uc_reg_read(uc, UC_X86_REG_EFLAGS, &rflags);
+
+    struct FlagInfo {
+        const char* name;
+        uint8_t bit;
+        bool expected;
+        bool actual;
+    };
+
+    FlagInfo flags[] = {
+        { "CF", 0, g_regs.rflags.flags.CF, (rflags >> 0) & 1 },
+        { "PF", 2, g_regs.rflags.flags.PF, (rflags >> 2) & 1 },
+        { "AF", 4, g_regs.rflags.flags.AF, (rflags >> 4) & 1 },
+        { "ZF", 6, g_regs.rflags.flags.ZF, (rflags >> 6) & 1 },
+        { "SF", 7, g_regs.rflags.flags.SF, (rflags >> 7) & 1 },
+        { "TF", 8, g_regs.rflags.flags.TF, (rflags >> 8) & 1 },
+        { "IF", 9, g_regs.rflags.flags.IF, (rflags >> 9) & 1 },
+        { "DF", 10, g_regs.rflags.flags.DF, (rflags >> 10) & 1 },
+        { "OF", 11, g_regs.rflags.flags.OF, (rflags >> 11) & 1 },
+    };
+
+    bool mismatch_found = false;
+    for (const auto& flag : flags) {
+        if (flag.expected != flag.actual) {
+            fprintf(stderr,
+                "Mismatch in flag %s (bit %d): expected %d, got %d {RIP : 0x%llx}\n",
+                flag.name, flag.bit, flag.expected, flag.actual,g_regs.rip);
+            mismatch_found = true;
+        }
+    }
+
+    if (mismatch_found) {
+        fprintf(stderr, "Full RFLAGS: expected 0x%llx, got 0x%llx\n",
+            g_regs.rflags.value, rflags);
+       // exit(1);
+    }
+
+
+    // GS_BASE
+    uint64_t gs_base = 0;
+    uc_reg_read(uc, UC_X86_REG_GS_BASE, &gs_base);
+    if (gs_base != g_regs.gs_base) {
+        fprintf(stderr, "Mismatch in GS_BASE: expected 0x%llx, got 0x%llx\n", g_regs.gs_base, gs_base);
+        exit(1);
+    }
+
+   
+}
+
+#endif
+//--------------------------------------------------------
 struct uint128_t {
     uint64_t low;
     uint64_t high;
@@ -189,11 +371,9 @@ bool ReadMemory(uint64_t address, void* buffer, SIZE_T size) {
 
 bool WriteMemory(uint64_t address, const void* buffer, SIZE_T size) {
     SIZE_T bytesWritten;
-#if DB_ENABLED
-    return 1;
-#else
+
     return WriteProcessMemory(hProcess, (LPVOID)address, buffer, size, &bytesWritten) && bytesWritten == size;
-#endif
+
  
 }
 
@@ -278,6 +458,45 @@ template<typename T>
 bool WriteEffectiveMemory(const ZydisDecodedOperand& op, T value) {
     return AccessEffectiveMemory(op, &value, true);
 }
+
+
+
+bool read_operand_value (const ZydisDecodedOperand& op, uint32_t width, uint64_t& out)   {
+    if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        switch (width) {
+        case 8:  out = get_register_value<uint8_t>(op.reg.value); break;
+        case 16: out = get_register_value<uint16_t>(op.reg.value); break;
+        case 32: out = get_register_value<uint32_t>(op.reg.value); break;
+        case 64: out = get_register_value<uint64_t>(op.reg.value); break;
+        default: return false;
+        }
+        return true;
+    }
+    else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+
+
+        switch (width) {
+
+        case 8: { uint8_t val;  if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
+        case 16: { uint16_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
+        case 32: { uint32_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
+        case 64: { uint64_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
+        default: return false;
+        }
+        return true;
+    }
+    else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        switch (width) {
+        case 8:  out = static_cast<uint8_t>(op.imm.value.s); break;
+        case 16: out = static_cast<uint16_t>(op.imm.value.s); break;
+        case 32: out = static_cast<uint32_t>(op.imm.value.s); break;
+        case 64: out = static_cast<uint64_t>(op.imm.value.s); break;
+        default: return false;
+        }
+        return true;
+    }
+    return false;
+    };
 
 // ------------------- Register Access -------------------
 
@@ -866,7 +1085,7 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
             overflow = carry = (wide_result != (int64_t)(int32_t)wide_result);
             break;
         case 64:
-            // در این حالت wide_result == result، اما باید بررسی کنیم آیا overflow شده یا نه
+
         {
             auto  wide = val1 * val2;
             overflow = carry = (wide != (int64_t)wide);
@@ -2371,46 +2590,18 @@ void emulate_dec(const ZydisDisassembledInstruction* instr) {
 
 void emulate_cmp(const ZydisDisassembledInstruction* instr) {
     const auto& op1 = instr->operands[0], op2 = instr->operands[1];
-    const auto width = instr->info.operand_width;
+    uint32_t width = instr->info.operand_width;
 
     uint64_t lhs = 0, rhs = 0;
 
-    auto read_operand_value = [width](const ZydisDecodedOperand& op, uint64_t& out) -> bool {
-        if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            switch (width) {
-            case 8:  out = get_register_value<uint8_t>(op.reg.value); break;
-            case 16: out = get_register_value<uint16_t>(op.reg.value); break;
-            case 32: out = get_register_value<uint32_t>(op.reg.value); break;
-            case 64: out = get_register_value<uint64_t>(op.reg.value); break;
-            default: return false;
-            }
-            return true;
-        }
-        else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-            switch (width) {
-            case 8: { uint8_t val;  if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
-            case 16: { uint16_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
-            case 32: { uint32_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
-            case 64: { uint64_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
-            default: return false;
-            }
-            return true;
-        }
-        else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-            out = op.imm.value.u;
-            return true;
-        }
-        return false;
-        };
 
-    if (!read_operand_value(op1, lhs) || !read_operand_value(op2, rhs)) {
+    if (!read_operand_value(op1, width, lhs) || !read_operand_value(op2, width, rhs)) {
         LOG(L"[!] Failed to read operands for CMP");
         return;
     }
 
     uint64_t result = lhs - rhs;
 
-    // محاسبه SF با cast به نوع signed مناسب
     bool sf = false;
     switch (width) {
     case 8:  sf = (static_cast<int8_t>(result) < 0); break;
@@ -2444,8 +2635,6 @@ void emulate_cmp(const ZydisDisassembledInstruction* instr) {
         << ", AF=" << g_regs.rflags.flags.AF);
 }
 
-
-
 void emulate_inc(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
 
@@ -2469,11 +2658,9 @@ void emulate_inc(const ZydisDisassembledInstruction* instr) {
         g_regs.rflags.flags.SF = (static_cast<int64_t>(result) < 0);
 
         // Update Parity Flag (PF) - Checking the parity of the lowest byte of the previous value
-        if (size_bits <= 32) {
-            g_regs.rflags.flags.PF = parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
-        } else {
-            g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
-        }
+
+            g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));  // Use the previous value's low byte for PF
+
 
         // Update Overflow Flag (OF) - Check for overflow
         g_regs.rflags.flags.OF = ((prev_value == 0x7FFFFFFFFFFFFFFF && static_cast<int64_t>(result) < 0) ||
@@ -2499,19 +2686,16 @@ void emulate_inc(const ZydisDisassembledInstruction* instr) {
 
         // Update the flags based on the result of INC
         uint64_t result = value;
-
+        uint64_t mask = (1ULL << size_bits) - 1;
+        result &= mask;
         // Update Zero Flag (ZF)
         g_regs.rflags.flags.ZF = (result == 0);
 
         // Update Sign Flag (SF) - Checking the sign bit of the result
         g_regs.rflags.flags.SF = (static_cast<int64_t>(result) < 0);
 
-        // Update Parity Flag (PF) - Checking the parity of the lowest byte of the previous value
-        if (size_bits <= 32) {
-            g_regs.rflags.flags.PF = parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
-        } else {
-            g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(prev_value));  // Use the previous value's low byte for PF
-        }
+       g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));  // Use the previous value's low byte for PF
+        
 
         // Update Overflow Flag (OF) - Check for overflow
         g_regs.rflags.flags.OF = ((prev_value == 0x7FFFFFFFFFFFFFFF && static_cast<int64_t>(result) < 0) ||
@@ -3441,9 +3625,7 @@ void emulate_sar(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_cpuid(const ZydisDisassembledInstruction*) {
-#if DB_ENABLED
-    cpuid = 1;
-#endif
+
     int cpu_info[4];
     int input_eax = static_cast<int>(g_regs.rax.q);
     int input_ecx = static_cast<int>(g_regs.rcx.q);
@@ -3888,103 +4070,7 @@ void emulate_stosd(const ZydisDisassembledInstruction* instr) {
 
 
 // ------------------- Emulator Loop -------------------
-#if DB_ENABLED
-void start_emulation(uint64_t startAddress) {
-    uint64_t address = startAddress;
-    BYTE buffer[16] = { 0 };
-    SIZE_T bytesRead = 0;
-    Zydis disasm(true);
 
-    //only for debugging purposes
-// DumpRegisters();
-    if (!ReadProcessMemory(hProcess, (LPCVOID)address, buffer, sizeof(buffer), &bytesRead) || bytesRead == 0)
-        exit(0);
-    if (disasm.Disassemble(address, buffer, bytesRead)) {
-        const ZydisDisassembledInstruction* op = disasm.GetInstr();
-        instr = op->info;
-
-        std::string instrText = disasm.InstructionText();
-        LOG(L"0x" << std::hex << disasm.Address()
-            << L": " << std::wstring(instrText.begin(), instrText.end()));
-
-
-        bool has_lock = (instr.attributes & ZYDIS_ATTRIB_HAS_LOCK) != 0;
-        if (has_lock) {
-            LOG(L"[~] LOCK prefix detected.");
-        }
-         has_rep = (instr.attributes & ZYDIS_ATTRIB_HAS_REP) != 0;
-        if (has_rep) {
-            LOG(L"[~] REP prefix detected.");
-        }
-        bool has_VEX = (instr.attributes & ZYDIS_ATTRIB_HAS_VEX) != 0;
-        if (has_VEX) {
-            LOG(L"[~] VEX prefix detected.");
-        }
-
-        no_cheek = 0;
-        cpuid = 0;
-        back_address = 0;
-
-        auto it = dispatch_table.find(instr.mnemonic);
-        if (it != dispatch_table.end()) {
-            it->second(op);
-        }
-        else {
-            std::wcout << L"[!] Instruction not implemented: "
-                << std::wstring(instrText.begin(), instrText.end()) << std::endl;
-            exit(0);
-        }
-
-        if (!disasm.IsJump() &&
-            instr.mnemonic != ZYDIS_MNEMONIC_CALL &&
-            instr.mnemonic != ZYDIS_MNEMONIC_RET)
-        {
-
-            g_regs.rip += instr.length;
-
-        }
-        else {
-            no_cheek = 1;
-                    LOG("addr : "<<  std::hex << address << " rip : " << std::hex << g_regs.rip);
-            if (!(g_regs.rip >= startaddr && g_regs.rip <= endaddr)) {
-                if ((address >= startaddr && address <= endaddr)) {
-                    if (disasm.IsJump()) {
-                        ReadMemory(g_regs.rsp.q, &back_address, 8);
-                    }
-                    else {
-                    back_address = address + instr.length;
-                    }
-
-                }
-                else {
-                    ReadMemory(g_regs.rsp.q, &back_address, 8);
-                }
-
-            }
-            else {
-                back_address = g_regs.rip;
-            }
-
-        }
-
-        address = g_regs.rip;
-        if (file_exists_next_to_exe) {
-            write_breakpoint_to_file(g_regs.rip);
-        }
-
-        StepOverAndEmulate(pi.hProcess, pi.hThread);
-
-
-    }
-
-    else {
-        std::wcout << L"Failed to disassemble at address 0x" << std::hex << address << std::endl;
-
-    }
-
-
-}
-#else
 void start_emulation(uint64_t startAddress) {
     uint64_t address = startAddress;
     BYTE buffer[16] = { 0 };
@@ -4020,6 +4106,15 @@ void start_emulation(uint64_t startAddress) {
                 LOG(L"[~] VEX prefix detected.");
             }
 
+#if TEST_WITH_UNICORN_ENABLED
+            auto err =  uc_emu_start(unicorn, address, 0, 0, 1);
+            if (err != UC_ERR_OK) {
+                LOG("problem in : " << std::hex << address);
+                exit(0);
+            }
+#endif 
+
+
 
             auto it = dispatch_table.find(instr.mnemonic);
             if (it != dispatch_table.end()) {
@@ -4044,7 +4139,12 @@ void start_emulation(uint64_t startAddress) {
                 ReadMemory(g_regs.rsp.q, &value, 8);
                 SetSingleBreakpointAndEmulate(pi.hProcess, value, pi.hThread);
             }
-
+#if TEST_WITH_UNICORN_ENABLED
+            if (instr.mnemonic == ZYDIS_MNEMONIC_CPUID || instr.mnemonic == ZYDIS_MNEMONIC_XGETBV || instr.mnemonic == ZYDIS_MNEMONIC_STOSD || instr.mnemonic == ZYDIS_MNEMONIC_STOSB || instr.mnemonic == ZYDIS_MNEMONIC_MOVZX)
+                LoadAllMemoryRegionsToUnicorn(unicorn);
+            else
+            check_registers(unicorn);
+#endif
         }
 
         else {
@@ -4053,7 +4153,7 @@ void start_emulation(uint64_t startAddress) {
         }
     }
 }
-#endif
+
 
 
 
@@ -4140,257 +4240,6 @@ std::vector<uint32_t> GetTLSCallbackRVAs(const std::wstring& exePath) {
         tlsCallbacks.push_back(static_cast<uint32_t>(callback - optionalHeader.ImageBase));
     return tlsCallbacks;
 }
-
-
-
-#if DB_ENABLED
-void CompareRFlags(const CONTEXT& ctx) {
-
-    if (g_regs.rflags.flags.CF != ((ctx.EFlags >> 0) & 1)) {
-        std::wcout << L"[!] CF mismatch: Emulated=" << g_regs.rflags.flags.CF
-            << L", Actual=" << ((ctx.EFlags >> 0) & 1) << std::endl;
-        exit(0);
-        
-    }
-
-    if (g_regs.rflags.flags.PF != ((ctx.EFlags >> 2) & 1)) {
-        std::wcout << L"[!] PF mismatch: Emulated=" << g_regs.rflags.flags.PF
-            << L", Actual=" << ((ctx.EFlags >> 2) & 1) << std::endl;
-        exit(0);
-    }
-
-    if (g_regs.rflags.flags.AF != ((ctx.EFlags >> 4) & 1)) {
-        std::wcout << L"[!] AF mismatch: Emulated=" << g_regs.rflags.flags.AF
-            << L", Actual=" << ((ctx.EFlags >> 4) & 1) << std::endl;
-        exit(0);
-    }
-
-    if (g_regs.rflags.flags.ZF != ((ctx.EFlags >> 6) & 1)) {
-        std::wcout << L"[!] ZF mismatch: Emulated=" << g_regs.rflags.flags.ZF
-            << L", Actual=" << ((ctx.EFlags >> 6) & 1) << std::endl;
-        exit(0);
-    }
-
-    if (g_regs.rflags.flags.SF != ((ctx.EFlags >> 7) & 1)) {
-        std::wcout << L"[!] SF mismatch: Emulated=" << g_regs.rflags.flags.SF
-            << L", Actual=" << ((ctx.EFlags >> 7) & 1) << std::endl;
-        exit(0);
-    }
-
-    if (g_regs.rflags.flags.DF != ((ctx.EFlags >> 10) & 1)) {
-        std::wcout << L"[!] DF mismatch: Emulated=" << g_regs.rflags.flags.DF
-            << L", Actual=" << ((ctx.EFlags >> 10) & 1) << std::endl;
-        exit(0);
-    }
-
-    if (g_regs.rflags.flags.OF != ((ctx.EFlags >> 11) & 1)) {
-        std::wcout << L"[!] OF mismatch: Emulated=" << g_regs.rflags.flags.OF
-            << L", Actual=" << ((ctx.EFlags >> 11) & 1) << std::endl;
-        exit(0);
-    }
-
-
-    bool flags_mismatch = false;
-    if (g_regs.rflags.value != ctx.EFlags) {
-        flags_mismatch = true;
-        std::wcout << L"[!] Full RFLAGS mismatch: Emulated=0x" << std::hex << g_regs.rflags.value
-            << L", Actual=0x" << std::hex << ctx.EFlags << std::endl;
-
-    }
-
-
-}
-void CompareRegistersWithEmulation(CONTEXT& ctx) {
-
-    if (g_regs.rip != ctx.Rip) {
-        std::wcout << L"[!] RIP mismatch: Emulated=0x" << std::hex << g_regs.rip
-            << L", Actual=0x" << std::hex << ctx.Rip << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-
-
-    if (g_regs.rsp.q != ctx.Rsp) {
-        std::wcout << L"[!] RSP mismatch: Emulated=0x" << std::hex << g_regs.rsp.q
-            << L", Actual=0x" << std::hex << ctx.Rsp << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-
-
-    if (g_regs.rbp.q != ctx.Rbp) {
-        std::wcout << L"[!] RBP mismatch: Emulated=0x" << std::hex << g_regs.rbp.q
-            << L", Actual=0x" << std::hex << ctx.Rbp << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-
-    if (g_regs.rax.q != ctx.Rax) {
-        std::wcout << L"[!] RAX mismatch: Emulated=0x" << std::hex << g_regs.rax.q
-            << L", Actual=0x" << std::hex << ctx.Rax << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.rbx.q != ctx.Rbx) {
-        std::wcout << L"[!] RBX mismatch: Emulated=0x" << std::hex << g_regs.rbx.q
-            << L", Actual=0x" << std::hex << ctx.Rbx << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.rcx.q != ctx.Rcx) {
-        std::wcout << L"[!] RCX mismatch: Emulated=0x" << std::hex << g_regs.rcx.q
-            << L", Actual=0x" << std::hex << ctx.Rcx << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.rdx.q != ctx.Rdx) {
-        std::wcout << L"[!] RDX mismatch: Emulated=0x" << std::hex << g_regs.rdx.q
-            << L", Actual=0x" << std::hex << ctx.Rdx << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.rsi.q != ctx.Rsi) {
-        std::wcout << L"[!] RSI mismatch: Emulated=0x" << std::hex << g_regs.rsi.q
-            << L", Actual=0x" << std::hex << ctx.Rsi << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.rdi.q != ctx.Rdi) {
-        std::wcout << L"[!] RDI mismatch: Emulated=0x" << std::hex << g_regs.rdi.q
-            << L", Actual=0x" << std::hex << ctx.Rdi << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-
-    if (g_regs.r8.q != ctx.R8) {
-        std::wcout << L"[!] R8 mismatch: Emulated=0x" << std::hex << g_regs.r8.q
-            << L", Actual=0x" << std::hex << ctx.R8 << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.r9.q != ctx.R9) {
-        std::wcout << L"[!] R9 mismatch: Emulated=0x" << std::hex << g_regs.r9.q
-            << L", Actual=0x" << std::hex << ctx.R9 << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.r10.q != ctx.R10) {
-        std::wcout << L"[!] R10 mismatch: Emulated=0x" << std::hex << g_regs.r10.q
-            << L", Actual=0x" << std::hex << ctx.R10 << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.r11.q != ctx.R11) {
-        std::wcout << L"[!] R11 mismatch: Emulated=0x" << std::hex << g_regs.r11.q
-            << L", Actual=0x" << std::hex << ctx.R11 << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.r12.q != ctx.R12) {
-        std::wcout << L"[!] R12 mismatch: Emulated=0x" << std::hex << g_regs.r12.q
-            << L", Actual=0x" << std::hex << ctx.R12 << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.r13.q != ctx.R13) {
-        std::wcout << L"[!] R13 mismatch: Emulated=0x" << std::hex << g_regs.r13.q
-            << L", Actual=0x" << std::hex << ctx.R13 << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.r14.q != ctx.R14) {
-        std::wcout << L"[!] R14 mismatch: Emulated=0x" << std::hex << g_regs.r14.q
-            << L", Actual=0x" << std::hex << ctx.R14 << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-    if (g_regs.r15.q != ctx.R15) {
-        std::wcout << L"[!] R15 mismatch: Emulated=0x" << std::hex << g_regs.r15.q
-            << L", Actual=0x" << std::hex << ctx.R15 << std::endl;
-        DumpRegisters();
-        exit(0);
-    }
-
-    // مقایسه RFLAGS
-    if (g_regs.rflags.value != ctx.EFlags) {
-        CompareRFlags(ctx);
-    }
-
-
-    for (int i = 0; i < 16; i++) {
-        if (memcmp(g_regs.ymm[i].xmm, &ctx.Xmm0 + i, 16) != 0) {
-            std::wcout << L"[!] XMM" << i << L" mismatch" << std::endl;
-        }
-    }
-}
-void StepOverAndEmulate(HANDLE hProcess, HANDLE hThread) {
-    CONTEXT ctx = { 0 };
-    ctx.ContextFlags = CONTEXT_FULL;
-
-    if (!GetThreadContext(hThread, &ctx)) {
-        std::wcout << L"[!] Failed to get thread context before stepping" << std::endl;
-        return;
-    }
-
-    // Set Trap Flag (TF) in EFLAGS to enable single-step
-    ctx.EFlags |= 0x100;
-
-    if (!SetThreadContext(hThread, &ctx)) {
-        std::wcout << L"[!] Failed to set thread context with TF" << std::endl;
-        return;
-    }
-
-    ContinueDebugEvent(pi.dwProcessId, GetThreadId(hThread), DBG_CONTINUE);
-
-    DEBUG_EVENT dbgEvent;
-    while (true) {
-        if (!WaitForDebugEvent(&dbgEvent, INFINITE)) break;
-
-        DWORD continueStatus = DBG_CONTINUE;
-
-        if (dbgEvent.dwDebugEventCode == EXCEPTION_DEBUG_EVENT) {
-            auto& er = dbgEvent.u.Exception.ExceptionRecord;
-            if (er.ExceptionCode == EXCEPTION_SINGLE_STEP) {
-                CONTEXT ctxAfter = { 0 };
-                ctxAfter.ContextFlags = CONTEXT_FULL;
-
-                if (!GetThreadContext(hThread, &ctxAfter)) {
-                    std::wcout << L"[!] Failed to get context after single-step" << std::endl;
-                    break;
-                }
-                if (has_rep && ctxAfter.Rip != g_regs.rip) {
-
-                    StepOverAndEmulate(pi.hProcess, pi.hThread);
-                    break;
-                }
-
-
-                if (!no_cheek && !cpuid) {
-                    CompareRegistersWithEmulation(ctxAfter);
-                    start_emulation(ctxAfter.Rip);
-                }
-                if (cpuid){
-                    start_emulation(ctxAfter.Rip);
-                }
-                if (no_cheek) {
-                    SetSingleBreakpointAndEmulate(pi.hProcess, back_address, pi.hThread);
-                }
-                break;
-            }
-            else {
-                std::wcout << L"[!] Unexpected exception code: 0x" << std::hex << er.ExceptionCode << std::endl;
-                break;
-            }
-        }
-        else {
-            std::wcout << L"[!] Unexpected debug event code: " << dbgEvent.dwDebugEventCode << std::endl;
-            break;
-        }
-    }
-}
-
-#endif
-
 
 void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread) {
     // Set new breakpoint
@@ -4510,7 +4359,9 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
                         memcpy(g_regs.ymm[15].xmm, &ctx.Xmm15, 16);
 
 
-
+#if TEST_WITH_UNICORN_ENABLED
+                        LoadAllMemoryRegionsToUnicorn(unicorn);
+#endif
                     }
 
                     // Emulate from breakpoint address
@@ -4564,7 +4415,14 @@ int wmain(int argc, wchar_t* argv[]) {
         wprintf(L"Usage: %s <path_to_exe>\n", argv[0]);
         return 1;
     }
+#if TEST_WITH_UNICORN_ENABLED
+    uc_err err = uc_open(UC_ARCH_X86, UC_MODE_64, &unicorn);
+    uc_hook invalid_mem_hook;
+    uc_hook_add(unicorn, &invalid_mem_hook,
+        UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
+        (void*)hook_mem_invalid, NULL, 1, 0);
 
+#endif
     std::wstring exePath = argv[1];
 
     dispatch_table = {
@@ -4648,11 +4506,7 @@ int wmain(int argc, wchar_t* argv[]) {
     STARTUPINFOW si = { sizeof(si) };
     uint32_t entryRVA = GetEntryPointRVA(exePath);
     std::vector<uint32_t> tlsRVAs = GetTLSCallbackRVAs(exePath);
-#if DB_ENABLED
-    if (file_exists_next_to_exe) {
-        my_breakpoint =  read_breakpoint_from_file();
-    }
-#endif
+
     if (!CreateProcessW(exePath.c_str(), NULL, NULL, NULL, FALSE, DEBUG_ONLY_THIS_PROCESS, NULL, NULL, &si, &pi)) return 1;
     DEBUG_EVENT dbgEvent = {};
     uint64_t baseAddress = 0;
@@ -4667,24 +4521,7 @@ int wmain(int argc, wchar_t* argv[]) {
             endaddr = baseAddress + optionalHeader.SizeOfImage;
             startaddr = baseAddress;
             BYTE orig;
-            #if DB_ENABLED
-            if (my_breakpoint) {
-                        if (SetBreakpoint(pi.hProcess, my_breakpoint, orig)) breakpoints[my_breakpoint] = orig;
-            }
-            else {
-                if (entryRVA) {
-
-                    uint64_t addr = baseAddress + entryRVA;
-                    if (SetBreakpoint(pi.hProcess, addr, orig)) breakpoints[addr] = orig;
-                }
-                for (uint32_t rva : tlsRVAs) {
-
-                    uint64_t addr = baseAddress + rva;
-                    if (SetBreakpoint(pi.hProcess, addr, orig)) breakpoints[addr] = orig;
-                }
-            }
-
-            #else
+         
                         if (entryRVA) {
 
                             uint64_t addr = baseAddress + entryRVA;
@@ -4695,7 +4532,7 @@ int wmain(int argc, wchar_t* argv[]) {
                             uint64_t addr = baseAddress + rva;
                             if (SetBreakpoint(pi.hProcess, addr, orig)) breakpoints[addr] = orig;
                         }
-            #endif
+
 
             break;
         }
@@ -4753,8 +4590,9 @@ int wmain(int argc, wchar_t* argv[]) {
                     memcpy(g_regs.ymm[13].xmm, &ctx.Xmm13, 16);
                     memcpy(g_regs.ymm[14].xmm, &ctx.Xmm14, 16);
                     memcpy(g_regs.ymm[15].xmm, &ctx.Xmm15, 16);
-
-
+#if TEST_WITH_UNICORN_ENABLED
+                    LoadAllMemoryRegionsToUnicorn(unicorn);
+#endif
                     start_emulation(exAddr);
                 }
             }
