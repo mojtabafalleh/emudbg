@@ -63,7 +63,6 @@ extern "C" NTSTATUS NTAPI NtQueryInformationThread(
 HANDLE hProcess;
 
 extern "C" uint64_t __cdecl xgetbv_asm(uint32_t ecx);
-extern "C" long sub_numbers(long a, long b);
 template<typename T>
 T get_register_value(ZydisRegister reg);
 // ------------------- Register Structures -------------------
@@ -110,229 +109,7 @@ struct RegState {
     uint64_t fs_base;
 } g_regs;
 //----------------------- MATH ------------------------------
-#define TEST_WITH_UNICORN_ENABLED 0
-#if TEST_WITH_UNICORN_ENABLED
-#include <unicorn/unicorn.h>
-uc_engine* unicorn;
-void LoadAllMemoryRegionsToUnicorn(uc_engine* unicorn) {
-  
 
-    struct {
-        int id;
-        uint64_t val;
-    } reg_map[] = {
-        { UC_X86_REG_RAX, g_regs.rax.q },
-        { UC_X86_REG_RBX, g_regs.rbx.q },
-        { UC_X86_REG_RCX, g_regs.rcx.q },
-        { UC_X86_REG_RDX, g_regs.rdx.q },
-        { UC_X86_REG_RSI, g_regs.rsi.q },
-        { UC_X86_REG_RDI, g_regs.rdi.q },
-        { UC_X86_REG_RBP, g_regs.rbp.q },
-        { UC_X86_REG_RSP, g_regs.rsp.q },
-        { UC_X86_REG_RIP, g_regs.rip},
-        { UC_X86_REG_R8, g_regs.r8.q },
-        { UC_X86_REG_R9, g_regs.r9.q },
-        { UC_X86_REG_R10, g_regs.r10.q },
-        { UC_X86_REG_R11, g_regs.r11.q },
-        { UC_X86_REG_R12, g_regs.r12.q },
-        { UC_X86_REG_R13, g_regs.r13.q },
-        { UC_X86_REG_R14, g_regs.r14.q },
-        { UC_X86_REG_R15, g_regs.r15.q },
-        { UC_X86_REG_RFLAGS, g_regs.rflags.value }
-    };
-    for (auto& r : reg_map) {
-        uc_reg_write(unicorn, r.id, &r.val);
-    }
-
-
-    uc_reg_write(unicorn, UC_X86_REG_GS_BASE, &g_regs.gs_base);
-
-}
-bool MapSingleMemoryPageToUnicorn(uc_engine* unicorn, uint64_t address) {
-    constexpr size_t pageSize = 0x1000;
-    uint64_t pageBase = address & ~(pageSize - 1);
-
-    MEMORY_BASIC_INFORMATION mbi{};
-    SIZE_T result = VirtualQueryEx(pi.hProcess, reinterpret_cast<LPCVOID>(pageBase), &mbi, sizeof(mbi));
-    if (result != sizeof(mbi)) {
-
-        return false;
-    }
-
-    DWORD prot = mbi.Protect;
-
-
-
-    // Determine UC protection flags
-    auto GetUnicornProtection = [](DWORD protect) -> int {
-        int flags = UC_PROT_READ;
-        if (protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))
-            flags |= UC_PROT_EXEC;
-        if (protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))
-            flags |= UC_PROT_WRITE;
-        return flags;
-        };
-
-    bool readable = (prot & PAGE_READONLY) || (prot & PAGE_READWRITE) ||
-        (prot & PAGE_EXECUTE_READ) || (prot & PAGE_EXECUTE_READWRITE);
-
-    if ((prot & PAGE_GUARD) || prot == PAGE_NOACCESS || !(mbi.State == MEM_COMMIT && readable)) {
-
-
-        std::vector<uint8_t> buffer(pageSize, 0);
-        SIZE_T bytesRead = 0;
-        if (ReadProcessMemory(pi.hProcess, reinterpret_cast<LPCVOID>(pageBase), buffer.data(), pageSize, &bytesRead) && bytesRead > 0) {
-
-
-            int ucProt = GetUnicornProtection(prot);
-
-            uc_err err = uc_mem_map(unicorn, pageBase, pageSize, ucProt);
-            if (err != UC_ERR_OK) {
-
-                return false;
-            }
-
-            uc_mem_write(unicorn, pageBase, buffer.data(), bytesRead);
-
-
-            return true;
-        }
-        else {
-
-            return false;
-        }
-    }
-
-    // Standard case - fully accessible memory
-    std::vector<uint8_t> buffer(pageSize);
-    SIZE_T bytesRead = 0;
-    if (!ReadProcessMemory(pi.hProcess, reinterpret_cast<LPCVOID>(pageBase), buffer.data(), pageSize, &bytesRead) || bytesRead == 0) {
-        return false;
-    }
-
-
-
-    int ucProt = GetUnicornProtection(prot);
-
-
-    uc_err err = uc_mem_map(unicorn, pageBase, pageSize, ucProt);
-    if (err != UC_ERR_OK) {
-        return false;
-    }
-
-    uc_mem_write(unicorn, pageBase, buffer.data(), bytesRead);
-
-
-
-    return true;
-}
-bool hook_mem_invalid(uc_engine* uc, uc_mem_type type, uint64_t address,
-    int size, int64_t value, void* user_data) {
-
-    uint64_t pageStart = address & ~0xFFF;
-
-    if (!MapSingleMemoryPageToUnicorn(uc, pageStart)) {
-        return false;  // do not retry access
-    }
-
-    return true;  // retry memory access
-}
-void check_registers(uc_engine* uc) {
-
-    struct {
-        uc_x86_reg uc_reg;
-        uint64_t gpr_val;
-        const char* name;
-    } gpr_regs[] = {
-        { UC_X86_REG_RAX, g_regs.rax.q, "RAX" },
-        { UC_X86_REG_RBX, g_regs.rbx.q, "RBX" },
-        { UC_X86_REG_RCX, g_regs.rcx.q, "RCX" },
-        { UC_X86_REG_RDX, g_regs.rdx.q, "RDX" },
-        { UC_X86_REG_RSI, g_regs.rsi.q, "RSI" },
-        { UC_X86_REG_RDI, g_regs.rdi.q, "RDI" },
-        { UC_X86_REG_RBP, g_regs.rbp.q, "RBP" },
-        { UC_X86_REG_RSP, g_regs.rsp.q, "RSP" },
-        { UC_X86_REG_R8,  g_regs.r8.q,  "R8"  },
-        { UC_X86_REG_R9,  g_regs.r9.q,  "R9"  },
-        { UC_X86_REG_R10, g_regs.r10.q, "R10" },
-        { UC_X86_REG_R11, g_regs.r11.q, "R11" },
-        { UC_X86_REG_R12, g_regs.r12.q, "R12" },
-        { UC_X86_REG_R13, g_regs.r13.q, "R13" },
-        { UC_X86_REG_R14, g_regs.r14.q, "R14" },
-        { UC_X86_REG_R15, g_regs.r15.q, "R15" },
-    };
-
-    for (auto& reg : gpr_regs) {
-        uint64_t val = 0;
-        uc_reg_read(uc, reg.uc_reg, &val);
-        if (val != reg.gpr_val) {
-            fprintf(stderr, "Mismatch in %s: expected 0x%llx, got 0x%llx {RIP : 0x%llx}\n",
-                reg.name, reg.gpr_val, val,g_regs.rip);
-            exit(1);
-        }
-    }
-
-    // RIP
-    uint64_t rip = 0;
-    uc_reg_read(uc, UC_X86_REG_RIP, &rip);
-    if (rip != g_regs.rip) {
-        fprintf(stderr, "Mismatch in RIP: expected 0x%llx, got 0x%llx\n", g_regs.rip, rip);
-        exit(1);
-    }
-
-    // RFLAGS
-    uint64_t rflags = 0;
-    uc_reg_read(uc, UC_X86_REG_EFLAGS, &rflags);
-
-    struct FlagInfo {
-        const char* name;
-        uint8_t bit;
-        bool expected;
-        bool actual;
-    };
-
-    FlagInfo flags[] = {
-        { "CF", 0, g_regs.rflags.flags.CF, (rflags >> 0) & 1 },
-        { "PF", 2, g_regs.rflags.flags.PF, (rflags >> 2) & 1 },
-        { "AF", 4, g_regs.rflags.flags.AF, (rflags >> 4) & 1 },
-        { "ZF", 6, g_regs.rflags.flags.ZF, (rflags >> 6) & 1 },
-        { "SF", 7, g_regs.rflags.flags.SF, (rflags >> 7) & 1 },
-        { "TF", 8, g_regs.rflags.flags.TF, (rflags >> 8) & 1 },
-        { "IF", 9, g_regs.rflags.flags.IF, (rflags >> 9) & 1 },
-        { "DF", 10, g_regs.rflags.flags.DF, (rflags >> 10) & 1 },
-        { "OF", 11, g_regs.rflags.flags.OF, (rflags >> 11) & 1 },
-    };
-
-    bool mismatch_found = false;
-    for (const auto& flag : flags) {
-        if (flag.expected != flag.actual) {
-            fprintf(stderr,
-                "Mismatch in flag %s (bit %d): expected %d, got %d {RIP : 0x%llx}\n",
-                flag.name, flag.bit, flag.expected, flag.actual,g_regs.rip);
-            mismatch_found = true;
-        }
-    }
-
-    if (mismatch_found) {
-        fprintf(stderr, "Full RFLAGS: expected 0x%llx, got 0x%llx\n",
-            g_regs.rflags.value, rflags);
-       // exit(1);
-    }
-
-
-    // GS_BASE
-    uint64_t gs_base = 0;
-    uc_reg_read(uc, UC_X86_REG_GS_BASE, &gs_base);
-    if (gs_base != g_regs.gs_base) {
-        fprintf(stderr, "Mismatch in GS_BASE: expected 0x%llx, got 0x%llx\n", g_regs.gs_base, gs_base);
-        exit(1);
-    }
-
-   
-}
-
-#endif
-//--------------------------------------------------------
 struct uint128_t {
     uint64_t low;
     uint64_t high;
@@ -3570,13 +3347,7 @@ void start_emulation(uint64_t startAddress) {
                 LOG(L"[~] VEX prefix detected.");
             }
 
-#if TEST_WITH_UNICORN_ENABLED
-            auto err =  uc_emu_start(unicorn, address, 0, 0, 1);
-            if (err != UC_ERR_OK) {
-                LOG("problem in : " << std::hex << address);
-                exit(0);
-            }
-#endif 
+
 
 
 
@@ -3603,12 +3374,7 @@ void start_emulation(uint64_t startAddress) {
                 ReadMemory(g_regs.rsp.q, &value, 8);
                 SetSingleBreakpointAndEmulate(pi.hProcess, value, pi.hThread);
             }
-#if TEST_WITH_UNICORN_ENABLED
-            if (instr.mnemonic == ZYDIS_MNEMONIC_CPUID || instr.mnemonic == ZYDIS_MNEMONIC_XGETBV || instr.mnemonic == ZYDIS_MNEMONIC_STOSD || instr.mnemonic == ZYDIS_MNEMONIC_STOSB || instr.mnemonic == ZYDIS_MNEMONIC_MOVZX)
-                LoadAllMemoryRegionsToUnicorn(unicorn);
-            else
-            check_registers(unicorn);
-#endif
+
         }
 
         else {
@@ -3823,9 +3589,7 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
                         memcpy(g_regs.ymm[15].xmm, &ctx.Xmm15, 16);
 
 
-#if TEST_WITH_UNICORN_ENABLED
-                        LoadAllMemoryRegionsToUnicorn(unicorn);
-#endif
+
                     }
 
                     // Emulate from breakpoint address
@@ -3879,14 +3643,7 @@ int wmain(int argc, wchar_t* argv[]) {
         wprintf(L"Usage: %s <path_to_exe>\n", argv[0]);
         return 1;
     }
-#if TEST_WITH_UNICORN_ENABLED
-    uc_err err = uc_open(UC_ARCH_X86, UC_MODE_64, &unicorn);
-    uc_hook invalid_mem_hook;
-    uc_hook_add(unicorn, &invalid_mem_hook,
-        UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
-        (void*)hook_mem_invalid, NULL, 1, 0);
 
-#endif
     std::wstring exePath = argv[1];
 
     dispatch_table = {
@@ -4054,9 +3811,7 @@ int wmain(int argc, wchar_t* argv[]) {
                     memcpy(g_regs.ymm[13].xmm, &ctx.Xmm13, 16);
                     memcpy(g_regs.ymm[14].xmm, &ctx.Xmm14, 16);
                     memcpy(g_regs.ymm[15].xmm, &ctx.Xmm15, 16);
-#if TEST_WITH_UNICORN_ENABLED
-                    LoadAllMemoryRegionsToUnicorn(unicorn);
-#endif
+
                     start_emulation(exAddr);
                 }
             }
