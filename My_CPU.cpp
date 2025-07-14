@@ -22,7 +22,7 @@ uint64_t lastBreakpointAddr = 0;
 BYTE lastOrigByte = 0;
 PROCESS_INFORMATION pi;
 bool has_rep;
-#define LOG_ENABLED 0
+#define LOG_ENABLED 1
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
@@ -461,43 +461,6 @@ bool WriteEffectiveMemory(const ZydisDecodedOperand& op, T value) {
 
 
 
-bool read_operand_value (const ZydisDecodedOperand& op, uint32_t width, uint64_t& out)   {
-    if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        switch (width) {
-        case 8:  out = get_register_value<uint8_t>(op.reg.value); break;
-        case 16: out = get_register_value<uint16_t>(op.reg.value); break;
-        case 32: out = get_register_value<uint32_t>(op.reg.value); break;
-        case 64: out = get_register_value<uint64_t>(op.reg.value); break;
-        default: return false;
-        }
-        return true;
-    }
-    else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-
-
-        switch (width) {
-
-        case 8: { uint8_t val;  if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
-        case 16: { uint16_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
-        case 32: { uint32_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
-        case 64: { uint64_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
-        default: return false;
-        }
-        return true;
-    }
-    else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        switch (width) {
-        case 8:  out = static_cast<uint8_t>(op.imm.value.s); break;
-        case 16: out = static_cast<uint16_t>(op.imm.value.s); break;
-        case 32: out = static_cast<uint32_t>(op.imm.value.s); break;
-        case 64: out = static_cast<uint64_t>(op.imm.value.s); break;
-        default: return false;
-        }
-        return true;
-    }
-    return false;
-    };
-
 // ------------------- Register Access -------------------
 
 std::unordered_map<ZydisRegister, void*> reg_lookup = {
@@ -848,7 +811,89 @@ void update_flags_neg(uint64_t result, uint64_t val, int size_bits) {
         break;
     }
 }
+//----------------------- read / write instruction  -------------------------
+inline uint64_t zero_extend(uint64_t value, uint8_t width) {
+    if (width >= 64) return value;
+    return value & ((1ULL << width) - 1);
+}
 
+bool read_operand_value(const ZydisDecodedOperand& op, uint32_t width, uint64_t& out) {
+    if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        switch (width) {
+        case 8:  out = get_register_value<uint8_t>(op.reg.value); break;
+        case 16: out = get_register_value<uint16_t>(op.reg.value); break;
+        case 32: out = get_register_value<uint32_t>(op.reg.value); break;
+        case 64: out = get_register_value<uint64_t>(op.reg.value); break;
+        default: return false;
+        }
+        return true;
+    }
+    else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+
+
+        switch (width) {
+
+        case 8: { uint8_t val;  if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
+        case 16: { uint16_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
+        case 32: { uint32_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
+        case 64: { uint64_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
+        default: return false;
+        }
+        return true;
+    }
+    else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        switch (width) {
+        case 8:  out = static_cast<uint8_t>(op.imm.value.s); break;
+        case 16: out = static_cast<uint16_t>(op.imm.value.s); break;
+        case 32: out = static_cast<uint32_t>(op.imm.value.s); break;
+        case 64: out = static_cast<uint64_t>(op.imm.value.s); break;
+        default: return false;
+        }
+        return true;
+    }
+    return false;
+};
+
+int64_t read_signed_operand(const ZydisDecodedOperand& op, uint32_t width) {
+    uint64_t val = 0;
+    if (!read_operand_value(op, width, val)) {
+        LOG(L"[!] Failed to read operand");
+        return 0;
+    }
+    switch (width) {
+    case 8:  return static_cast<int8_t>(val);
+    case 16: return static_cast<int16_t>(val);
+    case 32: return static_cast<int32_t>(val);
+    case 64: return static_cast<int64_t>(val);
+    default: return 0;
+    }
+}
+
+bool write_operand_value(const ZydisDecodedOperand& op, uint32_t width, uint64_t value) {
+    switch (op.type) {
+    case ZYDIS_OPERAND_TYPE_REGISTER:
+        switch (width) {
+        case 8:  set_register_value<uint8_t>(op.reg.value, static_cast<uint8_t>(value)); break;
+        case 16: set_register_value<uint16_t>(op.reg.value, static_cast<uint16_t>(value)); break;
+        case 32: set_register_value<uint64_t>(op.reg.value, static_cast<uint32_t>(value)); break;
+        case 64: set_register_value<uint64_t>(op.reg.value, static_cast<uint64_t>(value)); break;
+        default: return false;
+        }
+        return true;
+
+    case ZYDIS_OPERAND_TYPE_MEMORY:
+        switch (width) {
+        case 8:  return WriteEffectiveMemory(op, static_cast<uint8_t>(value));
+        case 16: return WriteEffectiveMemory(op, static_cast<uint16_t>(value));
+        case 32: return WriteEffectiveMemory(op, static_cast<uint32_t>(value));
+        case 64: return WriteEffectiveMemory(op, static_cast<uint64_t>(value));
+        default: return false;
+        }
+
+    default:
+        return false;
+    }
+}
 
 // ----------------------- Break point helper ------------------
 
@@ -875,11 +920,22 @@ std::unordered_map<ZydisMnemonic, EmulateFunc> dispatch_table;
 
 void emulate_push(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
-    uint64_t value = (op.type == ZYDIS_OPERAND_TYPE_REGISTER) ? get_register_value<uint64_t>(op.reg.value) : op.imm.value.u;
+    uint64_t value = 0;
+
+    if (!read_operand_value(op, 64, value)) {
+        LOG(L"[!] Unsupported operand type for PUSH");
+        return;
+    }
+
+    value = zero_extend(value, 64);  
+
     g_regs.rsp.q -= 8;
+
     WriteMemory(g_regs.rsp.q, &value, 8);
+
     LOG(L"[+] PUSH 0x" << std::hex << value);
 }
+
 
 void emulate_pushfq(const ZydisDisassembledInstruction* instr) {
     g_regs.rsp.q -= 8;
@@ -898,107 +954,74 @@ void emulate_mul(const ZydisDisassembledInstruction* instr) {
     int operand_count = instr->info.operand_count - 1;
     int width = instr->info.operand_width;
 
-    int64_t val1 = 0, val2 = 0;
-    uint128_t result = { 0, 0 };
-
-    auto read_operand = [&](const ZydisDecodedOperand& op) -> int64_t {
-        if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            switch (width) {
-            case 8:  return static_cast<int8_t>(get_register_value<uint8_t>(op.reg.value));
-            case 16: return static_cast<int16_t>(get_register_value<uint16_t>(op.reg.value));
-            case 32: return static_cast<int32_t>(get_register_value<uint32_t>(op.reg.value));
-            case 64: return static_cast<int64_t>(get_register_value<uint64_t>(op.reg.value));
-            }
-        }
-        else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-            switch (width) {
-            case 8: { uint8_t v; ReadEffectiveMemory(op, &v); return static_cast<int8_t>(v); }
-            case 16: { uint16_t v; ReadEffectiveMemory(op, &v); return static_cast<int16_t>(v); }
-            case 32: { uint32_t v; ReadEffectiveMemory(op, &v); return static_cast<int32_t>(v); }
-            case 64: { uint64_t v; ReadEffectiveMemory(op, &v); return static_cast<int64_t>(v); }
-            }
-        }
-        return 0;
-        };
-
-    if (operand_count == 1) {
-        val1 = read_operand(operands[0]);
-        switch (width) {
-        case 8:  val2 = static_cast<int8_t>(g_regs.rax.l); break;
-        case 16: val2 = static_cast<int16_t>(g_regs.rax.w); break;
-        case 32: val2 = static_cast<int32_t>(g_regs.rax.d); break;
-        case 64: val2 = static_cast<int64_t>(g_regs.rax.q); break;
-        }
-
-        result = mul_64x64_to_128(val1, val2);
-
-        switch (width) {
-        case 8:
-            g_regs.rax.w = static_cast<uint16_t>(result.low);
-            break;
-        case 16:
-            g_regs.rax.w = static_cast<uint16_t>(result.low);
-            g_regs.rdx.w = static_cast<uint16_t>(result.low >> 16);
-            break;
-        case 32:
-            g_regs.rax.d = static_cast<uint32_t>(result.low);
-            g_regs.rdx.d = static_cast<uint32_t>(result.high);
-            break;
-        case 64:
-            g_regs.rax.q = result.low;
-            g_regs.rdx.q = result.high;
-            break;
-        }
-
-        LOG(L"[+] MUL (" << width << L"bit) => RDX:RAX = 0x" << std::hex << result.high << L":" << result.low);
-    }
-    else {
+    if (operand_count != 1) {
         LOG(L"[!] Unsupported MUL operand count: " << operand_count);
         return;
     }
+
+    uint64_t val1_u = 0;
+    if (!read_operand_value(operands[0], width, val1_u)) {
+        LOG(L"[!] Failed to read operand for MUL");
+        return;
+    }
+
+    int64_t val1 = static_cast<int64_t>(zero_extend(val1_u, width));
+    int64_t val2 = 0;
+
+    switch (width) {
+    case 8:  val2 = static_cast<int8_t>(g_regs.rax.l); break;
+    case 16: val2 = static_cast<int16_t>(g_regs.rax.w); break;
+    case 32: val2 = static_cast<int32_t>(g_regs.rax.d); break;
+    case 64: val2 = static_cast<int64_t>(g_regs.rax.q); break;
+    default:
+        LOG(L"[!] Unsupported operand width for MUL");
+        return;
+    }
+
+    uint128_t result = mul_64x64_to_128(val1, val2);
+
+    switch (width) {
+    case 8:
+        g_regs.rax.w = static_cast<uint16_t>(result.low);
+        break;
+    case 16:
+        g_regs.rax.w = static_cast<uint16_t>(result.low);
+        g_regs.rdx.w = static_cast<uint16_t>(result.low >> 16);
+        break;
+    case 32:
+        g_regs.rax.d = static_cast<uint32_t>(result.low);
+        g_regs.rdx.d = static_cast<uint32_t>(result.high);
+        break;
+    case 64:
+        g_regs.rax.q = result.low;
+        g_regs.rdx.q = result.high;
+        break;
+    }
+
+    LOG(L"[+] MUL (" << width << L"bit) => RDX:RAX = 0x" << std::hex << result.high << L":" << result.low);
 
     // Update flags
     g_regs.rflags.flags.CF = g_regs.rflags.flags.OF = (result.high != 0);
     g_regs.rflags.flags.ZF = (result.low == 0);
     g_regs.rflags.flags.SF = (result.low >> (width - 1)) & 1;
 
-    uint8_t lowbyte = result.low & 0xFF;
+    uint8_t lowbyte = static_cast<uint8_t>(result.low & 0xFF);
     g_regs.rflags.flags.PF = !parity(lowbyte);
 }
 
+
 void emulate_imul(const ZydisDisassembledInstruction* instr) {
-    const auto& operands = instr->operands;
+    const auto& ops = instr->operands;
     int operand_count = instr->info.operand_count - 1;
     int width = instr->info.operand_width;
 
-    int64_t val1 = 0, val2 = 0, result = 0;
+    int64_t val1 = 0, val2 = 0, imm = 0;
     uint128_t result128 = { 0, 0 };
-
-    auto read_operand = [&](const ZydisDecodedOperand& op) -> int64_t {
-        if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            switch (width) {
-            case 8:  return static_cast<int8_t>(get_register_value<uint8_t>(op.reg.value));
-            case 16: return static_cast<int16_t>(get_register_value<uint16_t>(op.reg.value));
-            case 32: return static_cast<int32_t>(get_register_value<uint32_t>(op.reg.value));
-            case 64: return static_cast<int64_t>(get_register_value<uint64_t>(op.reg.value));
-            }
-        }
-        else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-            switch (width) {
-            case 8: { uint8_t v; ReadEffectiveMemory(op, &v); return static_cast<int8_t>(v); }
-            case 16: { uint16_t v; ReadEffectiveMemory(op, &v); return static_cast<int16_t>(v); }
-            case 32: { uint32_t v; ReadEffectiveMemory(op, &v); return static_cast<int32_t>(v); }
-            case 64: { uint64_t v; ReadEffectiveMemory(op, &v); return static_cast<int64_t>(v); }
-            }
-        }
-        else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-            return static_cast<int64_t>(op.imm.value.s);
-        }
-        return 0;
-        };
+    int64_t result64 = 0;
 
     if (operand_count == 1) {
-        val1 = read_operand(operands[0]);
+        val1 = read_signed_operand(ops[0], width);
+        // val2 = RAX (implicit)
         switch (width) {
         case 8:  val2 = static_cast<int8_t>(g_regs.rax.l); break;
         case 16: val2 = static_cast<int16_t>(g_regs.rax.w); break;
@@ -1025,43 +1048,30 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
             g_regs.rdx.q = result128.high;
             break;
         }
-
-        LOG(L"[+] IMUL (" << width << L"bit) => RDX:RAX = 0x" << std::hex << result128.high << L":" << result128.low);
+        LOG(L"[+] IMUL (1 operand, " << width << L"bit): RDX:RAX = 0x" << std::hex << result128.high << L":" << result128.low);
     }
     else if (operand_count == 2) {
-        val1 = read_operand(operands[0]);
-        val2 = read_operand(operands[1]);
-        result = val1 * val2;
+        val1 = read_signed_operand(ops[0], width);
+        val2 = read_signed_operand(ops[1], width);
+        result64 = val1 * val2;
 
-        switch (width) {
-        case 8:  set_register_value<uint8_t>(operands[0].reg.value, static_cast<uint8_t>(result)); break;
-        case 16: set_register_value<uint16_t>(operands[0].reg.value, static_cast<uint16_t>(result)); break;
-        case 32: set_register_value<uint32_t>(operands[0].reg.value, static_cast<uint32_t>(result)); break;
-        case 64: set_register_value<uint64_t>(operands[0].reg.value, static_cast<uint64_t>(result)); break;
-        }
-
-        LOG(L"[+] IMUL (2 operands) => RESULT = 0x" << std::hex << result);
+        write_operand_value(ops[0], width, static_cast<uint64_t>(result64));
+        LOG(L"[+] IMUL (2 operands): RESULT = 0x" << std::hex << result64);
     }
     else if (operand_count == 3) {
-        val2 = read_operand(operands[1]);
-        int64_t imm = read_operand(operands[2]);
-        result = val2 * imm;
+        val1 = read_signed_operand(ops[1], width);
+        imm = read_signed_operand(ops[2], width);
+        result64 = val1 * imm;
 
-        switch (width) {
-        case 8:  set_register_value<uint8_t>(operands[0].reg.value, static_cast<uint8_t>(result)); break;
-        case 16: set_register_value<uint16_t>(operands[0].reg.value, static_cast<uint16_t>(result)); break;
-        case 32: set_register_value<uint32_t>(operands[0].reg.value, static_cast<uint32_t>(result)); break;
-        case 64: set_register_value<uint64_t>(operands[0].reg.value, static_cast<uint64_t>(result)); break;
-        }
-
-        LOG(L"[+] IMUL (3 operands) => RESULT = 0x" << std::hex << result);
+        write_operand_value(ops[0], width, static_cast<uint64_t>(result64));
+        LOG(L"[+] IMUL (3 operands): RESULT = 0x" << std::hex << result64);
     }
     else {
         LOG(L"[!] Unsupported IMUL operand count: " << operand_count);
         return;
     }
 
-    // ====== FLAGS UPDATE ======
+    // Update flags
     bool overflow = false;
     bool carry = false;
 
@@ -1073,7 +1083,6 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
     }
     else {
         int64_t wide_result = (int64_t)val1 * (int64_t)val2;
-
         switch (width) {
         case 8:
             overflow = carry = (wide_result != (int64_t)(int8_t)wide_result);
@@ -1085,44 +1094,17 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
             overflow = carry = (wide_result != (int64_t)(int32_t)wide_result);
             break;
         case 64:
-
-        {
-            auto  wide = val1 * val2;
-            overflow = carry = (wide != (int64_t)wide);
-        }
-        break;
+            overflow = carry = false; // 64-bit overflow detection complex; assume no overflow
+            break;
         }
     }
-    if (operand_count == 1)
-        g_regs.rflags.flags.ZF = (result == 0);
-    else
-         g_regs.rflags.flags.ZF = 0;
-    g_regs.rflags.flags.SF = ((result & (1 << (width * 8 - 1))) != 0);
 
-
+    g_regs.rflags.flags.ZF = (operand_count == 1) ? (result128.low == 0) : 0;
+    g_regs.rflags.flags.SF = ((operand_count == 1 ? result128.low : result64) & (1ULL << (width * 8 - 1))) != 0;
     g_regs.rflags.flags.OF = overflow;
-    
-
-    if (operand_count == 1) {
-        g_regs.rflags.flags.CF = g_regs.rflags.flags.OF = overflow;
-    }
-    else {
-        int64_t min_val = 0, max_val = 0;
-        switch (width) {
-        case 8:  min_val = INT8_MIN;  max_val = INT8_MAX;  break;
-        case 16: min_val = INT16_MIN; max_val = INT16_MAX; break;
-        case 32: min_val = INT32_MIN; max_val = INT32_MAX; break;
-        case 64: min_val = INT64_MIN; max_val = INT64_MAX; break;
-        }
-
-        bool overflow_occurred = (result < min_val) || (result > max_val);
-        g_regs.rflags.flags.CF = g_regs.rflags.flags.OF = overflow_occurred;
-    }
-
-
+    g_regs.rflags.flags.CF = overflow;
     g_regs.rflags.flags.AF = 0;
-    g_regs.rflags.flags.PF = !parity(result);   // parity flag
-
+    g_regs.rflags.flags.PF = !parity((operand_count == 1 ? result128.low : result64) & 0xFF);
 }
 
 
@@ -1298,65 +1280,40 @@ void emulate_xorps(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_xor(const ZydisDisassembledInstruction* instr) {
-    const auto& dst = instr->operands[0], src = instr->operands[1];
-    uint64_t result = 0;
-    uint8_t width = instr->info.operand_width;
-    uint64_t mask = (width < 64) ? ((1ULL << width) - 1) : ~0ULL;
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    const uint32_t width = instr->info.operand_width;
 
     uint64_t lhs = 0, rhs = 0;
 
-    // گرفتن مقدار lhs
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        lhs = get_register_value<uint64_t>(dst.reg.value);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (!ReadEffectiveMemory(dst, &lhs)) {
-            LOG(L"[!] Failed to read memory in XOR");
-            return;
-        }
-    }
 
-    // گرفتن مقدار rhs
-    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        rhs = get_register_value<uint64_t>(src.reg.value);
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        rhs = src.imm.value.u;
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (!ReadEffectiveMemory(src, &rhs)) {
-            LOG(L"[!] Failed to read memory in XOR");
-            return;
-        }
-    }
-    else {
-        LOG(L"[!] Unsupported XOR source operand type");
+    if (!read_operand_value(dst, width, lhs)) {
+        LOG(L"[!] Failed to read destination operand in XOR");
         return;
     }
 
-    result = (lhs ^ rhs) & mask;
+    if (!read_operand_value(src, width, rhs)) {
+        LOG(L"[!] Failed to read source operand in XOR");
+        return;
+    }
 
-    // نوشتن مقدار نتیجه به مقصد
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        set_register_value<uint64_t>(dst.reg.value, result);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        WriteEffectiveMemory(dst, result);
-    }
-    else {
-        LOG(L"[!] Unsupported XOR destination operand type");
+    uint64_t result = zero_extend(lhs ^ rhs, width);
+
+
+    if (!write_operand_value(dst, width, result)) {
+        LOG(L"[!] Failed to write result in XOR");
         return;
     }
 
 
-
-    g_regs.rflags.flags.CF = 0;  
-    g_regs.rflags.flags.OF = 0;  
-    g_regs.rflags.flags.AF = 0;  
+    g_regs.rflags.flags.CF = 0;
+    g_regs.rflags.flags.OF = 0;
+    g_regs.rflags.flags.AF = 0;
 
     g_regs.rflags.flags.ZF = (result == 0);
     g_regs.rflags.flags.SF = (result >> (width - 1)) & 1;
     g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result & 0xFF));
+
 
     LOG(L"[+] XOR => 0x" << std::hex << result);
     LOG(L"[+] Flags => ZF=" << g_regs.rflags.flags.ZF
@@ -1366,6 +1323,7 @@ void emulate_xor(const ZydisDisassembledInstruction* instr) {
         << ", PF=" << g_regs.rflags.flags.PF
         << ", AF=" << g_regs.rflags.flags.AF);
 }
+
 
 
 void emulate_cdqe(const ZydisDisassembledInstruction* instr) {
@@ -1650,199 +1608,65 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
 void emulate_and(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
+    const uint32_t width = instr->info.operand_width;
 
-    uint64_t lhs = 0, rhs = 0, result = 0;
+    uint64_t lhs = 0, rhs = 0;
 
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        lhs = get_register_value<uint64_t>(dst.reg.value);
-        rhs = get_register_value<uint64_t>(src.reg.value);
-        result = lhs & rhs;
-        set_register_value<uint64_t>(dst.reg.value, result);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        lhs = get_register_value<uint64_t>(dst.reg.value);
 
-        if (instr->info.operand_width == 64) {
-            uint64_t value;
-            if (ReadEffectiveMemory(src, &value)) {
-                rhs = value;
-                result = lhs & rhs;
-                set_register_value<uint64_t>(dst.reg.value, result);
-            }
-        }
-        else if (instr->info.operand_width == 32) {
-            uint32_t value;
-            if (ReadEffectiveMemory(src, &value)) {
-                rhs = static_cast<uint64_t>(value);
-                result = lhs & rhs;
-                set_register_value<uint64_t>(dst.reg.value, result);
-            }
-        }
-        else if (instr->info.operand_width == 16) {
-            uint16_t value;
-            if (ReadEffectiveMemory(src, &value)) {
-                rhs = static_cast<uint64_t>(value);
-                result = lhs & rhs;
-                set_register_value<uint64_t>(dst.reg.value, result);
-            }
-        }
-        else if (instr->info.operand_width == 8) {
-            uint8_t value;
-            if (ReadEffectiveMemory(src, &value)) {
-                rhs = static_cast<uint64_t>(value);
-                result = lhs & rhs;
-                set_register_value<uint64_t>(dst.reg.value, result);
-            }
-        }
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        rhs = get_register_value<uint64_t>(src.reg.value);
-
-        if (instr->info.operand_width == 64) {
-            uint64_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                lhs = value;
-                result = lhs & rhs;
-                WriteEffectiveMemory(dst, result);
-            }
-        }
-        else if (instr->info.operand_width == 32) {
-            uint32_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                lhs = static_cast<uint64_t>(value);
-                result = lhs & rhs;
-                WriteEffectiveMemory(dst, static_cast<uint32_t>(result));
-            }
-        }
-        else if (instr->info.operand_width == 16) {
-            uint16_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                lhs = static_cast<uint64_t>(value);
-                result = lhs & rhs;
-                WriteEffectiveMemory(dst, static_cast<uint16_t>(result));
-            }
-        }
-        else if (instr->info.operand_width == 8) {
-            uint8_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                lhs = static_cast<uint64_t>(value);
-                result = lhs & rhs;
-                WriteEffectiveMemory(dst, static_cast<uint8_t>(result));
-            }
-        }
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        lhs = get_register_value<uint64_t>(dst.reg.value);
-        rhs = static_cast<uint64_t>(src.imm.value.u);
-        result = lhs & rhs;
-        set_register_value<uint64_t>(dst.reg.value, result);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        rhs = static_cast<uint64_t>(src.imm.value.u);
-
-        if (instr->info.operand_width == 64) {
-            uint64_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                lhs = value;
-                result = lhs & rhs;
-                WriteEffectiveMemory(dst, result);
-            }
-        }
-        else if (instr->info.operand_width == 32) {
-            uint32_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                lhs = static_cast<uint64_t>(value);
-                result = lhs & rhs;
-                WriteEffectiveMemory(dst, static_cast<uint32_t>(result));
-            }
-        }
-        else if (instr->info.operand_width == 16) {
-            uint16_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                lhs = static_cast<uint64_t>(value);
-                result = lhs & rhs;
-                WriteEffectiveMemory(dst, static_cast<uint16_t>(result));
-            }
-        }
-        else if (instr->info.operand_width == 8) {
-            uint8_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                lhs = static_cast<uint64_t>(value);
-                result = lhs & rhs;
-                WriteEffectiveMemory(dst, static_cast<uint8_t>(result));
-            }
-        }
-    }
-    else {
-        LOG(L"[!] Unsupported AND instruction");
+    if (!read_operand_value(dst, width, lhs)) {
+        LOG(L"[!] Failed to read destination operand in AND");
+        return;
     }
 
-    // Update flags based on the result
-    update_flags_and(result, lhs, rhs, instr->info.operand_width);
+    if (!read_operand_value(src, width, rhs)) {
+        LOG(L"[!] Failed to read source operand in AND");
+        return;
+    }
+
+ 
+    uint64_t result = zero_extend(lhs & rhs, width);
+
+
+    if (!write_operand_value(dst, width, result)) {
+        LOG(L"[!] Failed to write AND result");
+        return;
+    }
+
+
+    update_flags_and(result, lhs, rhs, width);
+
 
     LOG(L"[+] AND => 0x" << std::hex << result);
 }
 
-
 void emulate_or(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
+    const uint32_t width = instr->info.operand_width;
 
-    uint64_t lhs = 0, rhs = 0, result = 0;
+    uint64_t lhs = 0, rhs = 0;
 
-    // Determine operand width and mask
-    uint8_t width = instr->info.operand_width;
-    uint64_t mask = (width < 64) ? ((1ULL << width) - 1) : ~0ULL;
-
-    // Fetch LHS
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        lhs = get_register_value<uint64_t>(dst.reg.value);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        ReadEffectiveMemory(dst, &lhs);
-    }
-
-    // Fetch RHS
-    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        rhs = get_register_value<uint64_t>(src.reg.value);
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        rhs = src.imm.value.u;
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        ReadEffectiveMemory(src, &rhs);
-    }
-    else {
-        LOG(L"[!] Unsupported OR source operand type");
+    if (!read_operand_value(dst, width, lhs)) {
+        LOG(L"[!] Failed to read destination operand in OR");
         return;
     }
 
-    // Calculate result with masking
-    result = (lhs | rhs) & mask;
+    if (!read_operand_value(src, width, rhs)) {
+        LOG(L"[!] Failed to read source operand in OR");
+        return;
+    }
+
+
+    uint64_t result = zero_extend(lhs | rhs, width);
+
+
+    if (!write_operand_value(dst, width, result)) {
+        LOG(L"[!] Failed to write OR result");
+        return;
+    }
+
+
     update_flags_or(result, lhs, rhs, width);
-
-    // Write back result
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        set_register_value<uint64_t>(dst.reg.value, result);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (width == 64) {
-            WriteEffectiveMemory(dst, result);
-        }
-        else if (width == 32) {
-            WriteEffectiveMemory(dst, static_cast<uint32_t>(result));
-        }
-        else if (width == 16) {
-            WriteEffectiveMemory(dst, static_cast<uint16_t>(result));
-        }
-        else if (width == 8) {
-            WriteEffectiveMemory(dst, static_cast<uint8_t>(result));
-        }
-    }
-    else {
-        LOG(L"[!] Unsupported OR destination operand type");
-        return;
-    }
 
     LOG(L"[+] OR => 0x" << std::hex << result);
 }
@@ -2174,11 +1998,22 @@ void emulate_cmpxchg(const ZydisDisassembledInstruction* instr) {
 void emulate_pop(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
     uint64_t value = 0;
-    ReadMemory(g_regs.rsp.q, &value, 8);
+
+    if (!ReadMemory(g_regs.rsp.q, &value, 8)) {
+        LOG(L"[!] Failed to read memory at RSP for POP");
+        return;
+    }
+
     g_regs.rsp.q += 8;
-    set_register_value<uint64_t>(op.reg.value, value);
+
+    if (!write_operand_value(op, 64, value)) {
+        LOG(L"[!] Unsupported operand type for POP");
+        return;
+    }
+
     LOG(L"[+] POP => 0x" << std::hex << value);
 }
+
 
 void emulate_popfq(const ZydisDisassembledInstruction* instr) {
 
@@ -2190,45 +2025,39 @@ void emulate_popfq(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_add(const ZydisDisassembledInstruction* instr) {
-    const auto& dst = instr->operands[0], src = instr->operands[1];
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    uint8_t width = instr->info.operand_width;
+
     uint64_t lhs = 0, rhs = 0;
 
-    // Determine LHS (destination)
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        lhs = get_register_value<uint64_t>(dst.reg.value);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        ReadEffectiveMemory(dst, &lhs);
+    // Read operands
+    if (!read_operand_value(dst, width, lhs)) {
+        LOG(L"[!] Failed to read destination operand");
+        return;
     }
 
-    // Determine RHS (source)
-    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        rhs = get_register_value<uint64_t>(src.reg.value);
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        rhs = src.imm.value.u;
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        ReadEffectiveMemory(src, &rhs);
+    if (!read_operand_value(src, width, rhs)) {
+        LOG(L"[!] Failed to read source operand");
+        return;
     }
 
+    // Zero-extend immediate if needed
+    if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        rhs = zero_extend(rhs, width);
+    }
+
+    // Perform addition and mask result to operand width
     uint64_t result = lhs + rhs;
+    result = zero_extend(result, width);
 
-    // Mask result to operand size
-    uint8_t width = instr->info.operand_width;
-    if (width < 64) {
-        uint64_t mask = (1ULL << width) - 1;
-        result &= mask;
+    // Write back result
+    if (!write_operand_value(dst, width, result)) {
+        LOG(L"[!] Failed to write result to destination operand");
+        return;
     }
 
-    // Write result back
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        set_register_value<uint64_t>(dst.reg.value, result);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        WriteEffectiveMemory(dst, result);
-    }
-
+    // Update flags (assuming function exists)
     update_flags_add(result, lhs, rhs, width);
 
     LOG(L"[+] ADD => 0x" << std::hex << result);
@@ -2714,20 +2543,24 @@ void emulate_inc(const ZydisDisassembledInstruction* instr) {
 
 void emulate_jz(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
-    if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        if (g_regs.rflags.flags.ZF == 1) {
-            g_regs.rip = op.imm.value.s;
-        }
-        else {
-            g_regs.rip += instr->info.length;
-        }
-        LOG(L"[+] JZ to => 0x" << std::hex << g_regs.rip);
-    }
-    else {
+    uint64_t target = 0;
+
+    if (!read_operand_value(op, instr->info.operand_width, target)) {
         LOG(L"[!] Unsupported operand type for JZ");
         g_regs.rip += instr->info.length;
+        return;
     }
+
+    if (g_regs.rflags.flags.ZF) {
+        g_regs.rip = target;
+    }
+    else {
+        g_regs.rip += instr->info.length;
+    }
+
+    LOG(L"[+] JZ to => 0x" << std::hex << g_regs.rip);
 }
+
 
 void emulate_movsxd(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -2900,10 +2733,22 @@ void emulate_punpcklqdq(const ZydisDisassembledInstruction* instr) {
 }
 
 void emulate_jnz(const ZydisDisassembledInstruction* instr) {
-    if (!g_regs.rflags.flags.ZF)
-        g_regs.rip = instr->operands[0].imm.value.s;
-    else
+    const auto& op = instr->operands[0];
+    uint64_t target = 0;
+
+    if (!read_operand_value(op, instr->info.operand_width, target)) {
+        LOG(L"[!] Unsupported operand type for JNZ");
         g_regs.rip += instr->info.length;
+        return;
+    }
+
+    if (!g_regs.rflags.flags.ZF) {
+        g_regs.rip = target;
+    }
+    else {
+        g_regs.rip += instr->info.length;
+    }
+
     LOG(L"[+] JNZ to => 0x" << std::hex << g_regs.rip);
 }
 
@@ -3144,193 +2989,70 @@ void emulate_movdqa(const ZydisDisassembledInstruction* instr) {
 
 void emulate_mov(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
-    uint8_t width = instr->info.operand_width; // 8, 16, 32, 64
+    uint8_t width = instr->info.operand_width;
+    uint64_t val = 0;
 
-    auto zero_extend = [](uint64_t val, uint8_t bits) -> uint64_t {
-        if (bits >= 64) return val;
-        return val & ((1ULL << bits) - 1);
-        };
-
-    auto write_register = [&](ZydisRegister reg, uint64_t val) {
-        switch (width) {
-        case 8:
-            set_register_value<uint8_t>(reg, static_cast<uint8_t>(val));
-            break;
-        case 16:
-            set_register_value<uint16_t>(reg, static_cast<uint16_t>(val));
-            break;
-        case 32:
-
-            set_register_value<uint64_t>(reg, static_cast<uint32_t>(val)); 
-            break;
-        case 64:
-            set_register_value<uint64_t>(reg, static_cast<uint64_t>(val));
-            break;
-        }
-        };
-
-
-    auto read_register = [&](ZydisRegister reg) -> uint64_t {
-        switch (width) {
-        case 8:
-            return get_register_value<uint8_t>(reg);
-        case 16:
-            return get_register_value<uint16_t>(reg);
-        case 32:
-            return get_register_value<uint32_t>(reg);
-        case 64:
-            return get_register_value<uint64_t>(reg);
-        default:
-            return 0;
-        }
-        };
-
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        uint64_t val = zero_extend(static_cast<uint64_t>(src.imm.value.u), width);
-        write_register(dst.reg.value, val);
+    if (!read_operand_value(src, width, val)) {
+        LOG(L"[!] Failed to read source operand");
+        return;
     }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        uint64_t val = read_register(src.reg.value);
-        write_register(dst.reg.value, val);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        uint64_t val = 0;
-        switch (width) {
-        case 8: {
-            uint8_t tmp; if (ReadEffectiveMemory(src, &tmp)) val = tmp; break;
-        }
-        case 16: {
-            uint16_t tmp; if (ReadEffectiveMemory(src, &tmp)) val = tmp; break;
-        }
-        case 32: {
-            uint32_t tmp; if (ReadEffectiveMemory(src, &tmp)) val = tmp; break;
-        }
-        case 64: {
-            uint64_t tmp; if (ReadEffectiveMemory(src, &tmp)) val = tmp; break;
-        }
-        }
-        write_register(dst.reg.value, val);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        uint64_t val = read_register(src.reg.value);
-        switch (width) {
-        case 8:  WriteEffectiveMemory(dst, static_cast<uint8_t>(val)); break;
-        case 16: WriteEffectiveMemory(dst, static_cast<uint16_t>(val)); break;
-        case 32: WriteEffectiveMemory(dst, static_cast<uint32_t>(val)); break;
-        case 64: WriteEffectiveMemory(dst, static_cast<uint64_t>(val)); break;
-        }
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        uint64_t val = zero_extend(static_cast<uint64_t>(src.imm.value.u), width);
-        switch (width) {
-        case 8:  WriteEffectiveMemory(dst, static_cast<uint8_t>(val)); break;
-        case 16: WriteEffectiveMemory(dst, static_cast<uint16_t>(val)); break;
-        case 32: WriteEffectiveMemory(dst, static_cast<uint32_t>(val)); break;
-        case 64: WriteEffectiveMemory(dst, static_cast<uint64_t>(val)); break;
-        }
-    }
-    else {
-        LOG(L"[!] Unsupported MOV instruction");
+
+    if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE)
+        val = zero_extend(val, width);
+
+    if (!write_operand_value(dst, width, val)) {
+        LOG(L"[!] Failed to write destination operand");
     }
 }
-
-
 void emulate_sub(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
-    const auto width = instr->info.operand_width;
+    const uint32_t width = instr->info.operand_width;
 
-    int64_t lhs = 0, rhs = 0;  // استفاده از int64_t برای تفریق صحیح علامت‌دار
+    uint64_t lhs_raw = 0, rhs_raw = 0;
 
-    // Read destination value
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        switch (width) {
-        case 8:  lhs = get_register_value<int8_t>(dst.reg.value); break;
-        case 16: lhs = get_register_value<int16_t>(dst.reg.value); break;
-        case 32: lhs = get_register_value<int32_t>(dst.reg.value); break;
-        case 64: lhs = get_register_value<int64_t>(dst.reg.value); break;
-        }
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        // Read memory operand (rare for dst in SUB but for completeness)
-        switch (width) {
-        case 8: { int8_t val;  ReadEffectiveMemory(dst, &val); lhs = val; } break;
-        case 16: { int16_t val; ReadEffectiveMemory(dst, &val); lhs = val; } break;
-        case 32: { int32_t val; ReadEffectiveMemory(dst, &val); lhs = val; } break;
-        case 64: { int64_t val; ReadEffectiveMemory(dst, &val); lhs = val; } break;
-        }
+    // Read destination operand
+    if (!read_operand_value(dst, width, lhs_raw)) {
+        LOG(L"[!] Failed to read destination operand");
+        return;
     }
 
-    // Read source value
-    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        switch (width) {
-        case 8:  rhs = get_register_value<int8_t>(src.reg.value); break;
-        case 16: rhs = get_register_value<int16_t>(src.reg.value); break;
-        case 32: rhs = get_register_value<int32_t>(src.reg.value); break;
-        case 64: rhs = get_register_value<int64_t>(src.reg.value); break;
-        }
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        rhs = src.imm.value.s;  // استفاده از s برای مقادیر علامت‌دار
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        switch (width) {
-        case 8: { int8_t val;  ReadEffectiveMemory(src, &val); rhs = val; } break;
-        case 16: { int16_t val; ReadEffectiveMemory(src, &val); rhs = val; } break;
-        case 32: { int32_t val; ReadEffectiveMemory(src, &val); rhs = val; } break;
-        case 64: { int64_t val; ReadEffectiveMemory(src, &val); rhs = val; } break;
-        }
+    // Read source operand
+    if (!read_operand_value(src, width, rhs_raw)) {
+        LOG(L"[!] Failed to read source operand");
+        return;
     }
 
+    // Convert raw values to signed for correct subtraction behavior
+    int64_t lhs = static_cast<int64_t>(static_cast<int64_t>(lhs_raw));
+    int64_t rhs;
 
-
-    uint64_t result = lhs - rhs;
-
-
-
-    // Perform subtraction with masking
-
-
-    // Ensure masking is correctly applied
-    if (width < 64) {
-        result &= (1ULL << width) - 1;  // Apply masking based on operand width
+    if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        rhs = static_cast<int64_t>(src.imm.value.s); // use signed immediate directly
+    }
+    else {
+        rhs = static_cast<int64_t>(rhs_raw);
     }
 
-    // Write back the result
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        if (width == 8)
-            set_register_value<int8_t>(dst.reg.value, static_cast<int8_t>(result));
-        else if (width == 16)
-            set_register_value<int16_t>(dst.reg.value, static_cast<int16_t>(result));
-        else if (width == 32)
-            set_register_value<int32_t>(dst.reg.value, static_cast<int32_t>(result));
-        else
-            set_register_value<int64_t>(dst.reg.value, result);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (width == 8) {
-            int8_t val = static_cast<int8_t>(result);
-            WriteEffectiveMemory(dst, &val);
-        }
-        else if (width == 16) {
-            int16_t val = static_cast<int16_t>(result);
-            WriteEffectiveMemory(dst, &val);
-        }
-        else if (width == 32) {
-            int32_t val = static_cast<int32_t>(result);
-            WriteEffectiveMemory(dst, &val);
-        }
-        else {
-            WriteEffectiveMemory(dst, &result);
-        }
+    // Do the subtraction
+    int64_t signed_result = lhs - rhs;
+
+    // Apply zero-extension (masking)
+    uint64_t result = zero_extend(static_cast<uint64_t>(signed_result), width);
+
+    // Write result back
+    if (!write_operand_value(dst, width, result)) {
+        LOG(L"[!] Failed to write result to destination operand");
+        return;
     }
 
-    // Update flags accurately
+    // Update flags
     update_flags_sub(result, lhs, rhs, width);
 
-    // Log the result
+    // Log result
     LOG(L"[+] SUB => 0x" << std::hex << result);
 }
+
 
 
 void emulate_movzx(const ZydisDisassembledInstruction* instr) {
@@ -3490,66 +3212,118 @@ void emulate_ret(const ZydisDisassembledInstruction*) {
 }
 
 void emulate_shl(const ZydisDisassembledInstruction* instr) {
-    auto& dst = instr->operands[0];
-    auto& src = instr->operands[1];
-    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
-    uint8_t shift = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    uint32_t width = instr->info.operand_width;
+
+    uint64_t val = 0;
+    uint64_t shift = 0;
+
+    if (!read_operand_value(dst, width, val)) {
+        LOG(L"[!] Failed to read destination operand in SHL");
+        return;
+    }
+
+    if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        shift = src.imm.value.u;
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        if (!read_operand_value(src, 8, shift)) {  
+            LOG(L"[!] Failed to read shift count in SHL");
+            return;
+        }
+    }
+    else {
+        LOG(L"[!] Unsupported source operand type for SHL");
+        return;
+    }
+
+
+    shift &= 0x3F; 
+
     val <<= shift;
-    set_register_value<uint64_t>(dst.reg.value, val);
+
+
+    val &= (width < 64) ? ((1ULL << width) - 1) : ~0ULL;
+
+
+    if (!write_operand_value(dst, width, val)) {
+        LOG(L"[!] Failed to write destination operand in SHL");
+        return;
+    }
+
+
     LOG(L"[+] SHL => 0x" << std::hex << val);
 }
 
 void emulate_shr(const ZydisDisassembledInstruction* instr) {
-    auto& dst = instr->operands[0];
-    auto& src = instr->operands[1];
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
 
-    const auto width = instr->info.operand_width;
+    uint32_t width = instr->info.operand_width;
     uint64_t val = 0;
 
-    // Read destination with correct width
-    switch (width) {
-    case 8:  val = get_register_value<uint8_t>(dst.reg.value); break;
-    case 16: val = get_register_value<uint16_t>(dst.reg.value); break;
-    case 32: val = get_register_value<uint32_t>(dst.reg.value); break;
-    case 64: val = get_register_value<uint64_t>(dst.reg.value); break;
+
+    if (!read_operand_value(dst, width, val)) {
+        LOG(L"[!] Failed to read destination operand in SHR");
+        return;
     }
 
-    uint8_t shift = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
 
-    // Calculate OF before shift if needed
+    uint8_t shift = 0;
+    if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        shift = src.imm.value.u & 0x3F;  
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        uint64_t tmp = 0;
+        if (!read_operand_value(src, 8, tmp)) {
+            LOG(L"[!] Failed to read source operand in SHR");
+            return;
+        }
+        shift = static_cast<uint8_t>(tmp & 0x3F);
+    }
+    else {
+        LOG(L"[!] Unsupported source operand type in SHR");
+        return;
+    }
+
+    if (shift == 0) {
+
+        g_regs.rflags.flags.CF = 0;
+        g_regs.rflags.flags.OF = 0;
+        g_regs.rflags.flags.ZF = (val == 0);
+        g_regs.rflags.flags.SF = 0;
+        g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(val));
+        return;
+    }
+
     uint64_t old_msb = (val >> (width - 1)) & 1;
 
-    // Calculate carry flag before shift
-    if (shift != 0) {
-        g_regs.rflags.flags.CF = (val >> (shift - 1)) & 1;
-        val >>= shift;
+
+    g_regs.rflags.flags.CF = (val >> (shift - 1)) & 1;
+
+    val >>= shift;
+
+
+    val = zero_extend(val, width);
+
+
+    if (!write_operand_value(dst, width, val)) {
+        LOG(L"[!] Failed to write destination operand in SHR");
+        return;
     }
 
-    // Mask result if needed
-    if (width < 64)
-        val &= (1ULL << width) - 1;
 
-    // Write back result
-    switch (width) {
-    case 8:  set_register_value<uint8_t>(dst.reg.value, static_cast<uint8_t>(val)); break;
-    case 16: set_register_value<uint16_t>(dst.reg.value, static_cast<uint16_t>(val)); break;
-    case 32: set_register_value<uint32_t>(dst.reg.value, static_cast<uint32_t>(val)); break;
-    case 64: set_register_value<uint64_t>(dst.reg.value, val); break;
-    }
-
-    // Update flags
     g_regs.rflags.flags.ZF = (val == 0);
-    g_regs.rflags.flags.SF = 0; // SHR always fills with zero
+    g_regs.rflags.flags.SF = 0; 
     g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(val));
 
-    // Corrected OF logic:
-    if (shift == 1)
-        g_regs.rflags.flags.OF = old_msb;
-    else
-        g_regs.rflags.flags.OF = 0; // undefined, but 0 is typical
+
+    g_regs.rflags.flags.OF = (shift == 1) ? old_msb : 0;
 
     LOG(L"[+] SHR => 0x" << std::hex << val);
 }
+
 
 void emulate_stosb(const ZydisDisassembledInstruction* instr) {
     uint8_t al_val = static_cast<uint8_t>(g_regs.rax.l);
@@ -3617,12 +3391,43 @@ void emulate_jnbe(const ZydisDisassembledInstruction* instr) {
 void emulate_sar(const ZydisDisassembledInstruction* instr) {
     auto& dst = instr->operands[0];
     auto& src = instr->operands[1];
-    int64_t val = get_register_value<int64_t>(dst.reg.value);
-    uint8_t shift = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
+    const auto width = instr->info.operand_width;
+
+    uint64_t raw_val = 0;
+    if (!read_operand_value(dst, width, raw_val)) {
+        LOG(L"[!] Failed to read destination operand");
+        return;
+    }
+
+
+    int64_t val = 0;
+    switch (width) {
+    case 8:  val = static_cast<int8_t>(raw_val); break;
+    case 16: val = static_cast<int16_t>(raw_val); break;
+    case 32: val = static_cast<int32_t>(raw_val); break;
+    case 64: val = static_cast<int64_t>(raw_val); break;
+    default:
+        LOG(L"[!] Unsupported operand width");
+        return;
+    }
+
+    uint64_t tmp_shift = 0;
+    if (!read_operand_value(src, 8, tmp_shift)) { 
+        LOG(L"[!] Failed to read shift operand");
+        return;
+    }
+    uint8_t shift = static_cast<uint8_t>(tmp_shift);
+
     val >>= shift;
-    set_register_value<int64_t>(dst.reg.value, val);
+
+    if (!write_operand_value(dst, width, static_cast<uint64_t>(val))) {
+        LOG(L"[!] Failed to write result operand");
+        return;
+    }
+
     LOG(L"[+] SAR => 0x" << std::hex << val);
 }
+
 
 void emulate_cpuid(const ZydisDisassembledInstruction*) {
 
@@ -3649,253 +3454,93 @@ void emulate_cpuid(const ZydisDisassembledInstruction*) {
 
 }
 
-uint64_t get_operand_value(const ZydisDecodedOperand& op, uint8_t operand_width) {
-    uint64_t value = 0;
-
-    switch (op.type) {
-    case ZYDIS_OPERAND_TYPE_REGISTER:
-        if (operand_width == 8)
-            value = get_register_value<uint8_t>(op.reg.value);
-        else if (operand_width == 16)
-            value = get_register_value<uint16_t>(op.reg.value);
-        else if (operand_width == 32)
-            value = get_register_value<uint32_t>(op.reg.value);
-        else if (operand_width == 64)
-            value = get_register_value<uint64_t>(op.reg.value);
-        break;
-
-    case ZYDIS_OPERAND_TYPE_IMMEDIATE:
-        value = op.imm.value.u;
-        break;
-
-    case ZYDIS_OPERAND_TYPE_MEMORY:
-        ReadEffectiveMemory(op, &value);
-        break;
-
-    default:
-        LOG(L"[!] Unsupported operand type");
-        break;
-    }
-
-    return value;
-}
 
 void emulate_test(const ZydisDisassembledInstruction* instr) {
-    auto& op1 = instr->operands[0];
-    auto& op2 = instr->operands[1];
+    const auto& op1 = instr->operands[0];
+    const auto& op2 = instr->operands[1];
+    const uint32_t width = instr->info.operand_width;
 
-    uint64_t lhs = get_operand_value(op1, instr->info.operand_width);
-    uint64_t rhs = get_operand_value(op2, instr->info.operand_width);
-    uint64_t result = lhs & rhs;
-
-    g_regs.rflags.flags.ZF = (result == 0);
+    uint64_t lhs = 0, rhs = 0;
 
 
-    int width_bits = instr->info.operand_width * 8;
-    g_regs.rflags.flags.SF = (result >> (width_bits - 1)) & 1;
-
-
-    g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
-
-    g_regs.rflags.flags.CF = 0;
-    g_regs.rflags.flags.OF = 0;
-    g_regs.rflags.flags.AF =0;
-
-    LOG(L"[+] TEST => 0x" << std::hex << lhs << L" & 0x" << rhs);
-    LOG(L"[+] Flags after TEST: ZF=" << g_regs.rflags.flags.ZF
-        << L", SF=" << g_regs.rflags.flags.SF);
-}
-
-void emulate_not(const ZydisDisassembledInstruction* instr) {
-    const auto& dst = instr->operands[0];
-    uint8_t width = instr->info.operand_width; // عرض (width) 8، 16، 32 یا 64
-
-    // Helper lambda to extend value to 64 bits for memory operations
-    auto zero_extend = [](uint64_t val, uint8_t bits) -> uint64_t {
-        uint64_t mask = (bits < 64) ? ((1ULL << bits) - 1) : ~0ULL;
-        return val & mask;
-        };
-
-    switch (dst.type) {
-    case ZYDIS_OPERAND_TYPE_REGISTER: {
-        // برای رجیسترها مشابه قبل عمل می‌کنیم
-        switch (width) {
-        case 8: {
-            uint8_t val = get_register_value<uint8_t>(dst.reg.value);
-            uint8_t res = ~val;
-            set_register_value<uint8_t>(dst.reg.value, res);
-            LOG(L"[+] NOT => 0x" << std::hex << static_cast<int>(res));
-            break;
-        }
-        case 16: {
-            uint16_t val = get_register_value<uint16_t>(dst.reg.value);
-            uint16_t res = ~val;
-            set_register_value<uint16_t>(dst.reg.value, res);
-            LOG(L"[+] NOT => 0x" << std::hex << res);
-            break;
-        }
-        case 32: {
-            uint32_t val = get_register_value<uint32_t>(dst.reg.value);
-            uint32_t res = ~val;
-            set_register_value<uint32_t>(dst.reg.value, res);
-            LOG(L"[+] NOT => 0x" << std::hex << res);
-            break;
-        }
-        case 64: {
-            uint64_t val = get_register_value<uint64_t>(dst.reg.value);
-            uint64_t res = ~val;
-            set_register_value<uint64_t>(dst.reg.value, res);
-            LOG(L"[+] NOT => 0x" << std::hex << res);
-            break;
-        }
-        default:
-            LOG(L"[!] Unsupported NOT operand width: " << width);
-            return;
-        }
-        break;
-    }
-    case ZYDIS_OPERAND_TYPE_MEMORY: {
-        // برای عملیات حافظه
-        if (width == 64) {
-            uint64_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                uint64_t res = ~value;
-                WriteEffectiveMemory(dst, res);
-                LOG(L"[+] NOT => 0x" << std::hex << res);
-            }
-        }
-        else if (width == 32) {
-            uint32_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                uint32_t res = ~value;
-                WriteEffectiveMemory(dst, res);
-                LOG(L"[+] NOT => 0x" << std::hex << res);
-            }
-        }
-        else if (width == 16) {
-            uint16_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                uint16_t res = ~value;
-                WriteEffectiveMemory(dst, res);
-                LOG(L"[+] NOT => 0x" << std::hex << res);
-            }
-        }
-        else if (width == 8) {
-            uint8_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                uint8_t res = ~value;
-                WriteEffectiveMemory(dst, res);
-                LOG(L"[+] NOT => 0x" << std::hex << static_cast<int>(res));
-            }
-        }
-        else {
-            LOG(L"[!] Unsupported NOT operand width: " << width);
-            return;
-        }
-        break;
-    }
-    default:
-        LOG(L"[!] Unsupported NOT operand type");
+    if (!read_operand_value(op1, width, lhs)) {
+        LOG(L"[!] Failed to read first operand in TEST");
         return;
     }
 
-    LOG(L"[+] NOT executed (width: " << width << ")");
+    if (!read_operand_value(op2, width, rhs)) {
+        LOG(L"[!] Failed to read second operand in TEST");
+        return;
+    }
+
+    const uint64_t result = lhs & rhs;
+
+
+    const uint64_t masked_result = zero_extend(result, width);
+
+
+    g_regs.rflags.flags.ZF = (masked_result == 0);
+    g_regs.rflags.flags.SF = (masked_result >> (width - 1)) & 1;
+    g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(masked_result & 0xFF));
+    g_regs.rflags.flags.CF = 0;
+    g_regs.rflags.flags.OF = 0;
+    g_regs.rflags.flags.AF = 0;
+
+    LOG(L"[+] TEST => 0x" << std::hex << lhs << L" & 0x" << rhs << L" = 0x" << masked_result);
+    LOG(L"[+] Flags => ZF=" << g_regs.rflags.flags.ZF
+        << L", SF=" << g_regs.rflags.flags.SF
+        << L", PF=" << g_regs.rflags.flags.PF
+        << L", CF=" << g_regs.rflags.flags.CF
+        << L", OF=" << g_regs.rflags.flags.OF
+        << L", AF=" << g_regs.rflags.flags.AF);
 }
+void emulate_not(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    uint8_t width = instr->info.operand_width; // 8,16,32,64 
+
+    uint64_t value = 0;
+    if (!read_operand_value(dst, width , value)) {
+        LOG(L"[!] Failed to read operand for NOT");
+        return;
+    }
+
+    uint64_t result = ~value;
+    result = zero_extend(result, width );
+
+    if (!write_operand_value(dst, width , result)) {
+        LOG(L"[!] Failed to write operand for NOT");
+        return;
+    }
+
+
+
+    LOG(L"[+] NOT => 0x" << std::hex << result);
+}
+
 
 void emulate_neg(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
-    int width = instr->info.operand_width;
+    uint8_t width = instr->info.operand_width; // 8,16,32,64
 
-    // Helper lambda to extend value to 64 bits for memory operations
-    auto zero_extend = [](uint64_t val, uint8_t bits) -> uint64_t {
-        uint64_t mask = (bits < 64) ? ((1ULL << bits) - 1) : ~0ULL;
-        return val & mask;
-        };
-
-    switch (dst.type) {
-    case ZYDIS_OPERAND_TYPE_REGISTER: {
-        switch (width) {
-        case 8: {
-            uint8_t val = get_register_value<uint8_t>(dst.reg.value);
-            uint8_t res = -val;
-            set_register_value<uint8_t>(dst.reg.value, res);
-            update_flags_neg(res, val, 8);
-            break;
-        }
-        case 16: {
-            uint16_t val = get_register_value<uint16_t>(dst.reg.value);
-            uint16_t res = -val;
-            set_register_value<uint16_t>(dst.reg.value, res);
-            update_flags_neg(res, val, 16);
-            break;
-        }
-        case 32: {
-            uint32_t val = get_register_value<uint32_t>(dst.reg.value);
-            uint32_t res = -val;
-            set_register_value<uint32_t>(dst.reg.value, res);
-            update_flags_neg(res, val, 32);
-            break;
-        }
-        case 64: {
-            uint64_t val = get_register_value<uint64_t>(dst.reg.value);
-            uint64_t res = -val;
-            set_register_value<uint64_t>(dst.reg.value, res);
-            update_flags_neg(res, val, 64);
-            break;
-        }
-        default:
-            LOG(L"[!] Unsupported NEG operand width: " << width);
-            return;
-        }
-        break;
-    }
-    case ZYDIS_OPERAND_TYPE_MEMORY: {
-        // NEG for memory
-        if (width == 64) {
-            uint64_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                uint64_t res = -value;
-                WriteEffectiveMemory(dst, res);
-                update_flags_neg(res, value, 64);
-            }
-        }
-        else if (width == 32) {
-            uint32_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                uint32_t res = -value;
-                WriteEffectiveMemory(dst, res);
-                update_flags_neg(res, value, 32);
-            }
-        }
-        else if (width == 16) {
-            uint16_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                uint16_t res = -value;
-                WriteEffectiveMemory(dst, res);
-                update_flags_neg(res, value, 16);
-            }
-        }
-        else if (width == 8) {
-            uint8_t value;
-            if (ReadEffectiveMemory(dst, &value)) {
-                uint8_t res = -value;
-                WriteEffectiveMemory(dst, res);
-                update_flags_neg(res, value, 8);
-            }
-        }
-        else {
-            LOG(L"[!] Unsupported NEG operand width: " << width);
-            return;
-        }
-        break;
-    }
-    default:
-        LOG(L"[!] Unsupported NEG operand type");
+    uint64_t value = 0;
+    if (!read_operand_value(dst, width, value)) {  
+        LOG(L"[!] Failed to read operand for NEG");
         return;
     }
 
-    LOG(L"[+] NEG executed (width: " << width << ")");
+
+    uint64_t result = static_cast<uint64_t>(-static_cast<int64_t>(value));
+    result = zero_extend(result, width );  
+    if (!write_operand_value(dst, width, result)) {
+        LOG(L"[!] Failed to write operand for NEG");
+        return;
+    }
+
+    update_flags_neg(result, value, width );  
+
+    LOG(L"[+] NEG executed => 0x" << std::hex << result << L" (width: " << (int)width << L")");
 }
+
 
 
 void emulate_jmp(const ZydisDisassembledInstruction* instr) {
@@ -3931,59 +3576,61 @@ void emulate_jmp(const ZydisDisassembledInstruction* instr) {
 
 void emulate_xchg(const ZydisDisassembledInstruction* instr) {
     const auto& op1 = instr->operands[0], op2 = instr->operands[1];
+    uint8_t width = instr->info.operand_width;
 
-    if (op1.type == ZYDIS_OPERAND_TYPE_REGISTER && op2.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        uint64_t val1 = get_register_value<uint64_t>(op1.reg.value);
-        uint64_t val2 = get_register_value<uint64_t>(op2.reg.value);
-        set_register_value<uint64_t>(op1.reg.value, val2);
-        set_register_value<uint64_t>(op2.reg.value, val1);
-    }
-    else if (op1.type == ZYDIS_OPERAND_TYPE_MEMORY && op2.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        uint64_t mem_val = 0;
-        if (!ReadEffectiveMemory(op1, &mem_val)) {
-            LOG(L"[!] Failed to read memory for XCHG");
-            return;
-        }
-        uint64_t reg_val = get_register_value<uint64_t>(op2.reg.value);
-
-        // Swap
-        WriteEffectiveMemory(op1, reg_val);
-        set_register_value<uint64_t>(op2.reg.value, mem_val);
-    }
-    else if (op1.type == ZYDIS_OPERAND_TYPE_REGISTER && op2.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        uint64_t mem_val = 0;
-        if (!ReadEffectiveMemory(op2, &mem_val)) {
-            LOG(L"[!] Failed to read memory for XCHG");
-            return;
-        }
-        uint64_t reg_val = get_register_value<uint64_t>(op1.reg.value);
-
-        // Swap
-        WriteEffectiveMemory(op2, reg_val);
-        set_register_value<uint64_t>(op1.reg.value, mem_val);
-    }
-    else if (op1.type == ZYDIS_OPERAND_TYPE_MEMORY && op2.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+    if (op1.type == ZYDIS_OPERAND_TYPE_MEMORY && op2.type == ZYDIS_OPERAND_TYPE_MEMORY) {
         LOG(L"[!] XCHG between two memory operands is invalid");
         return;
     }
-    else {
-        LOG(L"[!] Unsupported XCHG operands");
+
+    uint64_t val1 = 0, val2 = 0;
+
+    if (!read_operand_value(op1, width, val1) || !read_operand_value(op2, width, val2)) {
+        LOG(L"[!] Failed to read operands for XCHG");
+        return;
+    }
+
+    if (!write_operand_value(op1, width, val2) || !write_operand_value(op2, width, val1)) {
+        LOG(L"[!] Failed to write operands for XCHG");
         return;
     }
 
     LOG(L"[+] XCHG executed");
 }
 
+
 void emulate_rol(const ZydisDisassembledInstruction* instr) {
     auto& dst = instr->operands[0];
     auto& src = instr->operands[1];
-    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
-    uint8_t shift = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
-    shift &= 0x1F;
-    val = (val << shift) | (val >> (64 - shift));
-    set_register_value<uint64_t>(dst.reg.value, val);
+    const auto width = instr->info.operand_width;
+
+    uint64_t val = 0;
+    if (!read_operand_value(dst, width, val)) {
+        LOG(L"[!] Failed to read destination operand");
+        return;
+    }
+
+    uint64_t tmp_shift = 0;
+    if (!read_operand_value(src, 8, tmp_shift)) {  
+        LOG(L"[!] Failed to read shift operand");
+        return;
+    }
+    uint8_t shift = static_cast<uint8_t>(tmp_shift);
+
+    shift &= (width - 1);
+
+
+    val = (val << shift) | (val >> (width - shift));
+    val &= (width == 64) ? ~0ULL : ((1ULL << width) - 1);
+
+    if (!write_operand_value(dst, width, val)) {
+        LOG(L"[!] Failed to write result operand");
+        return;
+    }
+
     LOG(L"[+] ROL => 0x" << std::hex << val);
 }
+
 
 void emulate_vmovdqu(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -4009,13 +3656,34 @@ void emulate_vmovdqu(const ZydisDisassembledInstruction* instr) {
 void emulate_ror(const ZydisDisassembledInstruction* instr) {
     auto& dst = instr->operands[0];
     auto& src = instr->operands[1];
-    uint64_t val = get_register_value<uint64_t>(dst.reg.value);
-    uint8_t shift = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
-    shift &= 0x1F;
-    val = (val >> shift) | (val << (64 - shift));
-    set_register_value<uint64_t>(dst.reg.value, val);
+    const auto width = instr->info.operand_width;
+
+    uint64_t val = 0;
+    if (!read_operand_value(dst, width, val)) {
+        LOG(L"[!] Failed to read destination operand");
+        return;
+    }
+
+    uint64_t tmp_shift = 0;
+    if (!read_operand_value(src, 8, tmp_shift)) {  
+        LOG(L"[!] Failed to read shift operand");
+        return;
+    }
+    uint8_t shift = static_cast<uint8_t>(tmp_shift);
+
+    shift &= (width - 1);  
+
+    val = (val >> shift) | (val << (width - shift));
+    val &= (width == 64) ? ~0ULL : ((1ULL << width) - 1); 
+
+    if (!write_operand_value(dst, width, val)) {
+        LOG(L"[!] Failed to write result operand");
+        return;
+    }
+
     LOG(L"[+] ROR => 0x" << std::hex << val);
 }
+
 
 void emulate_setnz(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
