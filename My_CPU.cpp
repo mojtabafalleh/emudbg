@@ -875,6 +875,7 @@ bool read_operand_value(const ZydisDecodedOperand& op, uint32_t width, uint64_t&
     return false;
 };
 
+
 int64_t read_signed_operand(const ZydisDecodedOperand& op, uint32_t width) {
     uint64_t val = 0;
     if (!read_operand_value(op, width, val)) {
