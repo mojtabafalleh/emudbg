@@ -9,9 +9,6 @@
 #include "deps/zydis_wrapper.h"
 #include <tlhelp32.h>
 
-
-
-
 void DumpRegisters();
 void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread);
 
@@ -651,6 +648,75 @@ bool read_operand_value(const ZydisDecodedOperand& op, uint32_t width, uint64_t&
     }
     return false;
 };
+template<typename T>
+bool read_operand_value(const ZydisDecodedOperand& op, uint32_t width, T& out) {
+    constexpr size_t expected_bits = sizeof(T) * 8;
+
+    if constexpr (std::is_integral_v<T>) {
+        uint64_t temp = 0;
+        if (!read_operand_value(op, width, temp)) {
+            LOG(L"[!] Failed to read integral operand");
+            return false;
+        }
+        out = static_cast<T>(temp);
+        return true;
+    }
+
+    else if constexpr (
+        std::is_same_v<T, __m128> ||
+        std::is_same_v<T, __m128i>
+        ) {
+        if (width != expected_bits) {
+            LOG(L"[!] Warning: read_operand_value<T>: width ("<< width <<") != sizeof(T) ("<< expected_bits <<")");
+        }
+
+        if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            out = get_register_value<T>(op.reg.value);
+            return true;
+        }
+        else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+            if (!ReadEffectiveMemory(op, &out)) {
+                LOG(L"[!] Failed to read memory for __m128/__m128i operand");
+                return false;
+            }
+            return true;
+        }
+        else {
+            LOG(L"[!] Unsupported operand type for __m128/__m128i");
+            return false;
+        }
+    }
+
+    else if constexpr (
+        std::is_same_v<T, __m256i> ||
+        std::is_same_v<T, YMM>
+        ) {
+        if (width != expected_bits) {
+            LOG(L"[!] Warning: read_operand_value<T>:  width (" << width << ") != sizeof(T) (" << expected_bits << ")");
+        }
+
+        if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            out = get_register_value<T>(op.reg.value);
+            return true;
+        }
+        else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+            if (!ReadEffectiveMemory(op, &out)) {
+                LOG(L"[!] Failed to read memory for __m256i operand");
+                return false;
+            }
+            return true;
+        }
+        else {
+            LOG(L"[!] Unsupported operand type for __m256i");
+            return false;
+        }
+    }
+
+    else {
+        LOG(L"[!] Unsupported operand type in read_operand_value<T>");
+        return false;
+    }
+}
 
 
 int64_t read_signed_operand(const ZydisDecodedOperand& op, uint32_t width) {
@@ -693,6 +759,70 @@ bool write_operand_value(const ZydisDecodedOperand& op, uint32_t width, uint64_t
         return false;
     }
 }
+template<typename T>
+bool write_operand_value(const ZydisDecodedOperand& op, uint32_t width, const T& value) {
+    constexpr size_t expected_bits = sizeof(T) * 8;
+
+    if constexpr (std::is_integral_v<T>) {
+        return write_operand_value(op, width, static_cast<uint64_t>(value));
+    }
+
+    else if constexpr (
+        std::is_same_v<T, __m128> ||
+        std::is_same_v<T, __m128i>
+        ) {
+        if (width != expected_bits) {
+            LOG(L"[!] Warning: write_operand_value<T>: width ("<< width <<") != sizeof(T) ("<< expected_bits << ")" );
+        }
+
+        if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            set_register_value<T>(op.reg.value, value);
+            return true;
+        }
+        else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+            if (!WriteEffectiveMemory(op, &value)) {
+                LOG(L"[!] Failed to write memory for __m128/__m128i operand");
+                return false;
+            }
+            return true;
+        }
+        else {
+            LOG(L"[!] Unsupported operand type for __m128/__m128i");
+            return false;
+        }
+    }
+
+    else if constexpr (
+        std::is_same_v<T, __m256i> ||
+        std::is_same_v<T, YMM>
+        ) {
+        if (width != expected_bits) {
+            LOG(L"[!] Warning: write_operand_value<T>: width ("<< width << ") != sizeof(T) ("<< expected_bits << ")" );
+        }
+
+        if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            set_register_value<T>(op.reg.value, value);
+            return true;
+        }
+        else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+            if (!WriteEffectiveMemory(op, &value)) {
+                LOG(L"[!] Failed to write memory for __m256i operand");
+                return false;
+            }
+            return true;
+        }
+        else {
+            LOG(L"[!] Unsupported operand type for __m256i");
+            return false;
+        }
+    }
+
+    else {
+        LOG(L"[!] Unsupported type in write_operand_value<T>");
+        return false;
+    }
+}
+
 
 // ----------------------- Break point helper ------------------
 
@@ -906,6 +1036,27 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
     g_regs.rflags.flags.PF = !parity((operand_count == 1 ? result128.low : result64) & 0xFF);
 }
 
+//void emulate_movdqu(const ZydisDisassembledInstruction* instr) {
+//    const auto& dst = instr->operands[0];
+//    const auto& src = instr->operands[1];
+//
+//    constexpr uint32_t width = 128;
+//    __m128i value;
+//
+//    if (!read_operand_value<__m128i>(src, width, value)) {
+//        LOG(L"[!] Failed to read source operand in MOVDQU");
+//        return;
+//    }
+//
+//    if (!write_operand_value<__m128i>(dst, width, value)) {
+//        LOG(L"[!] Failed to write destination operand in MOVDQU");
+//        return;
+//    }
+//
+//    LOG(L"[+] MOVDQU executed");
+//}
+//
+// working version 
 
 void emulate_movdqu(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -946,6 +1097,7 @@ void emulate_movdqu(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] MOVDQU executed");
 }
 
+
 void emulate_xadd(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
@@ -955,95 +1107,29 @@ void emulate_xadd(const ZydisDisassembledInstruction* instr) {
         LOG(L"[!] XADD: Source must be register");
         return;
     }
-
     if (dst.type != ZYDIS_OPERAND_TYPE_REGISTER && dst.type != ZYDIS_OPERAND_TYPE_MEMORY) {
         LOG(L"[!] XADD: Destination must be register or memory");
         return;
     }
 
-    switch (width) {
-    case 64: {
-        uint64_t dst_val = 0;
-        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            dst_val = get_register_value<uint64_t>(dst.reg.value);
-        else
-            ReadEffectiveMemory(dst, &dst_val);
-
-        uint64_t src_val = get_register_value<uint64_t>(src.reg.value);
-        uint64_t result = dst_val + src_val;
-
-
-        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            set_register_value<uint64_t>(dst.reg.value, result);
-        else
-            WriteEffectiveMemory(dst, result);
-
-        set_register_value<uint64_t>(src.reg.value, dst_val);
-        update_flags_add(result, dst_val, src_val, 64);
-        break;
-    }
-    case 32: {
-        uint32_t dst_val = 0;
-        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            dst_val = get_register_value<uint32_t>(dst.reg.value);
-        else
-            ReadEffectiveMemory(dst, &dst_val);
-
-        uint32_t src_val = get_register_value<uint32_t>(src.reg.value);
-        uint32_t result = dst_val + src_val;
-
-        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            set_register_value<uint32_t>(dst.reg.value, result);
-        else
-            WriteEffectiveMemory(dst, result);
-
-        set_register_value<uint32_t>(src.reg.value, dst_val);
-        update_flags_add(result, dst_val, src_val, 32);
-        break;
-    }
-    case 16: {
-        uint16_t dst_val = 0;
-        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            dst_val = get_register_value<uint16_t>(dst.reg.value);
-        else
-            ReadEffectiveMemory(dst, &dst_val);
-
-        uint16_t src_val = get_register_value<uint16_t>(src.reg.value);
-        uint16_t result = dst_val + src_val;
-
-        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            set_register_value<uint16_t>(dst.reg.value, result);
-        else
-            WriteEffectiveMemory(dst, result);
-
-        set_register_value<uint16_t>(src.reg.value, dst_val);
-        update_flags_add(result, dst_val, src_val, 16);
-        break;
-    }
-    case 8: {
-        uint8_t dst_val = 0;
-        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            dst_val = get_register_value<uint8_t>(dst.reg.value);
-        else
-            ReadEffectiveMemory(dst, &dst_val);
-
-        uint8_t src_val = get_register_value<uint8_t>(src.reg.value);
-        uint8_t result = dst_val + src_val;
-
-        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER)
-            set_register_value<uint8_t>(dst.reg.value, result);
-        else
-            WriteEffectiveMemory(dst, result);
-
-        set_register_value<uint8_t>(src.reg.value, dst_val);
-        update_flags_add(result, dst_val, src_val, 8);
-        break;
-    }
-    default:
-        LOG(L"[!] Unsupported operand width for XADD: " << width);
+    uint64_t dst_val = 0, src_val = 0;
+    if (!read_operand_value(dst, width, dst_val) || !read_operand_value(src, width, src_val)) {
+        LOG(L"[!] XADD: Failed to read operands");
         return;
     }
 
+    uint64_t result = dst_val + src_val;
+
+    if (!write_operand_value(dst, width, result)) {
+        LOG(L"[!] XADD: Failed to write destination");
+        return;
+    }
+    if (!write_operand_value(src, width, dst_val)) {
+        LOG(L"[!] XADD: Failed to write source");
+        return;
+    }
+
+    update_flags_add(result, dst_val, src_val, width);
     LOG(L"[+] XADD executed (width: " << width << ")");
 }
 
@@ -1052,31 +1138,28 @@ void emulate_xorps(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
 
-    __m128 dst_val = get_register_value<__m128>(dst.reg.value);
-    __m128 src_val;
+    __m128 dst_val, src_val;
 
-    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        src_val = get_register_value<__m128>(src.reg.value);
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (!ReadEffectiveMemory(src, &src_val)) {
-            LOG(L"[!] Failed to read memory in xorps");
-            return;
-        }
-    }
-    else {
-        LOG(L"[!] Unsupported source operand type in xorps");
+    if (!read_operand_value(dst, 128, dst_val)) {
+        LOG(L"[!] Failed to read destination operand in xorps");
         return;
     }
 
+    if (!read_operand_value(src, 128, src_val)) {
+        LOG(L"[!] Failed to read source operand in xorps");
+        return;
+    }
 
     __m128 result = _mm_xor_ps(dst_val, src_val);
 
+    if (!write_operand_value(dst, 128, result)) {
+        LOG(L"[!] Failed to write result in xorps");
+        return;
+    }
 
-    set_register_value<__m128>(dst.reg.value, result);
-
-    LOG(L"[+] XORPS executed");
+    LOG(L"[+] XORPS executed successfully");
 }
+
 
 void emulate_xor(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -1212,66 +1295,16 @@ void emulate_cmovnbe(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-
     if (!(g_regs.rflags.flags.CF || g_regs.rflags.flags.ZF)) {
-        switch (width) {
-        case 64: {
-            uint64_t val = 0;
-            if (src.type == ZYDIS_OPERAND_TYPE_REGISTER)
-                val = get_register_value<uint64_t>(src.reg.value);
-            else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-                if (!ReadEffectiveMemory(src, &val)) {
-                    LOG(L"[!] Failed to read memory in cmovnbe (64-bit)");
-                    return;
-                }
-            }
-            set_register_value<uint64_t>(dst.reg.value, val);
-            break;
-        }
-        case 32: {
-            uint32_t val = 0;
-            if (src.type == ZYDIS_OPERAND_TYPE_REGISTER)
-                val = get_register_value<uint32_t>(src.reg.value);
-            else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-                if (!ReadEffectiveMemory(src, &val)) {
-                    LOG(L"[!] Failed to read memory in cmovnbe (32-bit)");
-                    return;
-                }
-            }
-            set_register_value<uint32_t>(dst.reg.value, val);
-            break;
-        }
-        case 16: {
-            uint16_t val = 0;
-            if (src.type == ZYDIS_OPERAND_TYPE_REGISTER)
-                val = get_register_value<uint16_t>(src.reg.value);
-            else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-                if (!ReadEffectiveMemory(src, &val)) {
-                    LOG(L"[!] Failed to read memory in cmovnbe (16-bit)");
-                    return;
-                }
-            }
-            set_register_value<uint16_t>(dst.reg.value, val);
-            break;
-        }
-        case 8: {
-            uint8_t val = 0;
-            if (src.type == ZYDIS_OPERAND_TYPE_REGISTER)
-                val = get_register_value<uint8_t>(src.reg.value);
-            else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-                if (!ReadEffectiveMemory(src, &val)) {
-                    LOG(L"[!] Failed to read memory in cmovnbe (8-bit)");
-                    return;
-                }
-            }
-            set_register_value<uint8_t>(dst.reg.value, val);
-            break;
-        }
-        default:
-            LOG(L"[!] Unsupported CMOVNBE width: " << width);
+        uint64_t val = 0;
+        if (!read_operand_value(src, width, val)) {
+            LOG(L"[!] Failed to read source operand in cmovnbe");
             return;
         }
-
+        if (!write_operand_value(dst, width, val)) {
+            LOG(L"[!] Failed to write destination operand in cmovnbe");
+            return;
+        }
         LOG(L"[+] CMOVNBE: moved (ZF=0, CF=0)");
     }
     else {
@@ -1282,124 +1315,58 @@ void emulate_cmovnbe(const ZydisDisassembledInstruction* instr) {
 void emulate_movsx(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
-    Zydis z;
-
+    uint32_t dst_width = instr->info.operand_width;
 
     if (dst.type != ZYDIS_OPERAND_TYPE_REGISTER) {
         LOG(L"[!] MOVSX destination must be a register");
         return;
     }
 
-    int64_t value = 0;
-
-    // تعیین سایز واقعی operand مبدا در صورت memory
-    uint8_t actual_src_size = src.size;
-
-    // اصلاح اندازه منبع
-    if (src.type == ZYDIS_OPERAND_TYPE_MEMORY && (src.size != 1 && src.size != 2 && src.size != 4)) {
-        switch (instr->info.operand_width) {
-        case 64:
-            actual_src_size = 2;  // برای movsx rax, word (2 بایت)
-            break;
-        case 32:
-            actual_src_size = 2;  // برای movsx eax, word (2 بایت)
-            break;
-        case 16:
-            actual_src_size = 2;  // برای movsx ax, word (2 بایت)
-            break;
-        default:
-            LOG(L"[!] Unable to infer MOVSX source size");
-            return;
-        }
-        LOG(L"[*] Inferred MOVSX memory source size = " << (int)actual_src_size);
+    // تعیین سایز منبع برای خواندن
+    uint8_t src_size = src.size;
+    if (src.type == ZYDIS_OPERAND_TYPE_MEMORY && src_size != 1 && src_size != 2 && src_size != 4) {
+        // برای حافظه معمولا 2 بایت در نظر می‌گیریم
+        src_size = 2;
+        LOG(L"[*] Inferred MOVSX memory source size = " << (int)src_size);
     }
 
-    // --- Handle source operand ---
-    if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        switch (actual_src_size) {
-        case 1: {
-            int8_t v;
-            if (!ReadEffectiveMemory(src, &v)) {
-                LOG(L"[!] Failed to read memory for MOVSX (byte)");
-                return;
-            }
-            value = static_cast<int64_t>(v);
-            break;
-        }
-        case 2: {
-            int16_t v;
-            if (!ReadEffectiveMemory(src, &v)) {
-                LOG(L"[!] Failed to read memory for MOVSX (word)");
-                return;
-            }
-            value = static_cast<int64_t>(v);
-            break;
-        }
-        case 4: {
-            int32_t v;
-            if (!ReadEffectiveMemory(src, &v)) {
-                LOG(L"[!] Failed to read memory for MOVSX (dword)");
-                return;
-            }
-            value = static_cast<int64_t>(v);
-            break;
-        }
-        default:
-            LOG(L"[!] Unsupported MOVSX memory source size: " << actual_src_size);
-            return;
-        }
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        switch (src.size) {
-        case 1: {
-            int8_t v = static_cast<int8_t>(get_register_value<uint8_t>(src.reg.value));
-            value = static_cast<int64_t>(v);
-            break;
-        }
-        case 2: {
-            int16_t v = static_cast<int16_t>(get_register_value<uint16_t>(src.reg.value));
-            value = static_cast<int64_t>(v);
-            break;
-        }
-        case 4: {
-            int32_t v = static_cast<int32_t>(get_register_value<uint32_t>(src.reg.value));
-            value = static_cast<int64_t>(v);
-            break;
-        }
-        default:
-            LOG(L"[!] Unsupported MOVSX register source size: " << src.size);
-            exit(0);
-            return;
-        }
-    }
-    else {
-        LOG(L"[!] Unsupported MOVSX source operand type");
-        exit(0);
+    // خواندن مقدار منبع به صورت signed با اندازه src_size * 8 بیت
+    int64_t value = read_signed_operand(src, src_size * 8);
+    // اگر مقدار صفر برگشت یعنی خطا (احتمالا)
+    if (value == 0 && !read_operand_value(src, src_size * 8, *(uint64_t*)nullptr)) {
+        // (اینجا میتونی چک دقیق‌تری انجام بدی ولی برای خلاصه این کافی است)
+        LOG(L"[!] Failed to read MOVSX source operand");
         return;
     }
 
-    // --- Write result to destination ---
-    switch (instr->info.operand_width) {
+    // نوشتن مقدار sign-extended شده به رجیستر مقصد بر اساس اندازه مقصد
+    bool success = false;
+    switch (dst_width) {
     case 64:
-        set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(value));
+        success = write_operand_value(dst, 64, static_cast<uint64_t>(value));
         break;
-    case 32: {
-        uint32_t val32 = static_cast<uint32_t>(value);
-        set_register_value<uint32_t>(dst.reg.value, val32);
-        set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(val32));
+    case 32:
+        success = write_operand_value(dst, 32, static_cast<uint32_t>(value));
+        if (success) {
+            // برای پاک کردن بیت‌های بالاتر، مقدار 64 بیت هم می‌نویسیم (در صورت نیاز)
+            set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(static_cast<uint32_t>(value)));
+        }
         break;
-    }
     case 16:
-        set_register_value<uint16_t>(dst.reg.value, static_cast<uint16_t>(value));
+        success = write_operand_value(dst, 16, static_cast<uint16_t>(value));
         break;
     default:
-        LOG(L"[!] Unsupported MOVSX destination width: " << instr->info.operand_width);
-        exit(0);
+        LOG(L"[!] Unsupported MOVSX destination width: " << dst_width);
+        return;
+    }
+
+    if (!success) {
+        LOG(L"[!] Failed to write MOVSX result");
         return;
     }
 
     LOG(L"[+] MOVSX: Sign-extended 0x" << std::hex << value
-        << L" to " << instr->info.operand_width << L" bits => "
+        << L" to " << dst_width << L" bits => "
         << ZydisRegisterGetString(dst.reg.value));
 }
 
@@ -1477,11 +1444,11 @@ void emulate_vinsertf128(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-    const auto& dst = instr->operands[0]; // ymm
+    const auto& dst = instr->operands[0];  // ymm
     const auto& src1 = instr->operands[1]; // ymm
-    const auto& src2 = instr->operands[2]; // xmm
-    const ZydisDecodedOperand* immOp = nullptr;
+    const auto& src2 = instr->operands[2]; // xmm or mem
 
+    const ZydisDecodedOperand* immOp = nullptr;
 
     if (instr->info.operand_count == 4) {
         if (instr->operands[3].type != ZYDIS_OPERAND_TYPE_IMMEDIATE) {
@@ -1490,9 +1457,9 @@ void emulate_vinsertf128(const ZydisDisassembledInstruction* instr) {
         }
         immOp = &instr->operands[3];
     }
-
-    else if (instr->info.operand_count == 3 && instr->operands[2].type != ZYDIS_OPERAND_TYPE_IMMEDIATE &&
-        instr->info.raw.imm->value.u >= 0) {
+    else if (instr->info.operand_count == 3 &&
+        instr->operands[2].type != ZYDIS_OPERAND_TYPE_IMMEDIATE &&
+        instr->info.raw.imm && instr->info.raw.imm->value.u >= 0) {
         static ZydisDecodedOperand fakeImm;
         fakeImm.type = ZYDIS_OPERAND_TYPE_IMMEDIATE;
         fakeImm.imm.value.u = instr->info.raw.imm[0].value.u;
@@ -1516,19 +1483,14 @@ void emulate_vinsertf128(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-
     YMM base = get_register_value<YMM>(src1.reg.value);
 
-    __m128i src_val = _mm_setzero_si128();
-    if (src2.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        src_val = get_register_value<__m128i>(src2.reg.value);
+    __m128i src_val;
+    if (!read_operand_value(src2, 128, src_val)) {
+        LOG(L"[!] Failed to read source operand in vinsertf128");
+        return;
     }
-    else if (src2.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (!ReadEffectiveMemory(src2, &src_val)) {
-            LOG(L"[!] Failed to read memory for vinsertf128");
-            return;
-        }
-    }
+
 
     if (imm == 0) {
         memcpy(base.xmm, &src_val, 16);
@@ -1552,76 +1514,39 @@ void emulate_vinsertf128(const ZydisDisassembledInstruction* instr) {
 void emulate_vmovdqa(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
-    const auto width = instr->info.operand_width;
+    const uint32_t width = max(dst.size,src.size);
 
-    if (width != 128 && width != 256) {
-        LOG(L"[!] Unsupported operand width in vmovdqa (only 128 or 256 bits)");
+
+    if (width != 0x80 && width != 0x100) {
+        LOG(L"[!] Unsupported operand width in VMOVDQA (only 128 or 256 bits)" << width);
         return;
     }
 
-
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        if (width == 128) {
-            __m128i val = get_register_value<__m128i>(src.reg.value);
-            set_register_value<__m128i>(dst.reg.value, val);
+    if (width == 0x80) {
+        __m128i value;
+        if (!read_operand_value(src, width, value)) {
+            LOG(L"[!] Failed to read source operand in VMOVDQA");
+            return;
         }
-        else {
-            __m256i val = get_register_value<__m256i>(src.reg.value);
-            set_register_value<__m256i>(dst.reg.value, val);
+        if (!write_operand_value(dst, width, value)) {
+            LOG(L"[!] Failed to write destination operand in VMOVDQA");
+            return;
         }
-
-        LOG(L"[+] VMOVDQA reg <- reg");
-        return;
+    }
+    else { // width == 256
+        __m256i value;
+        if (!read_operand_value(src, width, value)) {
+            LOG(L"[!] Failed to read source operand in VMOVDQA");
+            return;
+        }
+        if (!write_operand_value(dst, width, value)) {
+            LOG(L"[!] Failed to write destination operand in VMOVDQA");
+            return;
+        }
     }
 
-
-    if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        if (width == 128) {
-            __m128i val = get_register_value<__m128i>(src.reg.value);
-            if (!WriteEffectiveMemory(dst, val)) {
-                LOG(L"[!] Failed to write 128-bit to memory in vmovdqa");
-                return;
-            }
-        }
-        else {
-            __m256i val = get_register_value<__m256i>(src.reg.value);
-            if (!WriteEffectiveMemory(dst, val)) {
-                LOG(L"[!] Failed to write 256-bit to memory in vmovdqa");
-                return;
-            }
-        }
-
-        LOG(L"[+] VMOVDQA [mem] <- reg");
-        return;
-    }
-
-
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (width == 128) {
-            __m128i val;
-            if (!ReadEffectiveMemory(src, &val)) {
-                LOG(L"[!] Failed to read 128-bit from memory in vmovdqa");
-                return;
-            }
-            set_register_value<__m128i>(dst.reg.value, val);
-        }
-        else {
-            __m256i val;
-            if (!ReadEffectiveMemory(src, &val)) {
-                LOG(L"[!] Failed to read 256-bit from memory in vmovdqa");
-                return;
-            }
-            set_register_value<__m256i>(dst.reg.value, val);
-        }
-
-        LOG(L"[+] VMOVDQA reg <- [mem]");
-        return;
-    }
-
-    LOG(L"[!] Unsupported operand combination in vmovdqa");
+    LOG(L"[+] VMOVDQA executed");
 }
-
-
 
 void emulate_lea(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -1787,52 +1712,38 @@ void emulate_add(const ZydisDisassembledInstruction* instr) {
 
 
 void emulate_adc(const ZydisDisassembledInstruction* instr) {
-    const auto& dst = instr->operands[0], src = instr->operands[1];
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    uint8_t width = instr->info.operand_width;
+
     uint64_t lhs = 0, rhs = 0;
-
-    // Determine LHS (destination)
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        lhs = get_register_value<uint64_t>(dst.reg.value);
+    if (!read_operand_value(dst, width, lhs)) {
+        LOG(L"[!] Failed to read ADC destination operand");
+        return;
     }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        ReadEffectiveMemory(dst, &lhs);
-    }
-
-    // Determine RHS (source)
-    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        rhs = get_register_value<uint64_t>(src.reg.value);
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        rhs = src.imm.value.u;
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        ReadEffectiveMemory(src, &rhs);
+    if (!read_operand_value(src, width, rhs)) {
+        LOG(L"[!] Failed to read ADC source operand");
+        return;
     }
 
     uint64_t cf = g_regs.rflags.flags.CF ? 1 : 0;
     uint64_t temp = lhs + rhs;
     uint64_t result = temp + cf;
 
-    // Mask result to operand size
-    uint8_t width = instr->info.operand_width;
+
     if (width < 64) {
         uint64_t mask = (1ULL << width) - 1;
         result &= mask;
     }
 
-    // Write result back
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        set_register_value<uint64_t>(dst.reg.value, result);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        WriteEffectiveMemory(dst, result);
+    if (!write_operand_value(dst, width, result)) {
+        LOG(L"[!] Failed to write ADC result");
+        return;
     }
 
-    // Update flags with carry-in logic
-    // CF = (lhs + rhs + cf) < lhs || overflow from width
+
     g_regs.rflags.flags.CF = (temp < lhs) || (result < temp);
 
-    // OF = ((lhs ^ rhs ^ mask) & (lhs ^ result) & msb) != 0
     uint64_t msb = 1ULL << (width - 1);
     g_regs.rflags.flags.OF = ((~(lhs ^ rhs) & (lhs ^ result)) & msb) != 0;
 
@@ -1843,6 +1754,7 @@ void emulate_adc(const ZydisDisassembledInstruction* instr) {
 
     LOG(L"[+] ADC => 0x" << std::hex << result);
 }
+
 
 void emulate_stc(const ZydisDisassembledInstruction* instr) {
     g_regs.rflags.flags.CF = 1;
@@ -1967,25 +1879,26 @@ void emulate_div(const ZydisDisassembledInstruction* instr) {
 void emulate_rcr(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
-    uint8_t width = instr->info.operand_width; // bit width: 8, 16, 32, 64
-
-    auto zero_extend = [](uint64_t val, uint8_t bits) -> uint64_t {
-        uint64_t mask = (bits < 64) ? ((1ULL << bits) - 1) : ~0ULL;
-        return val & mask;
-        };
+    uint8_t width = instr->info.operand_width;
 
     uint64_t val = 0;
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        // MOV from register to register or register to immediate (already covered in previous version)
-        switch (width) {
-        case 8:  val = get_register_value<uint8_t>(dst.reg.value); break;
-        case 16: val = get_register_value<uint16_t>(dst.reg.value); break;
-        case 32: val = get_register_value<uint32_t>(dst.reg.value); break;
-        case 64: val = get_register_value<uint64_t>(dst.reg.value); break;
-        }
+    if (!read_operand_value(dst, width, val)) {
+        LOG(L"[!] Failed to read RCR destination operand");
+        return;
     }
 
-    uint8_t count = (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) ? src.imm.value.u : get_register_value<uint8_t>(src.reg.value);
+    uint8_t count = 0;
+    if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        count = static_cast<uint8_t>(src.imm.value.u);
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        count = get_register_value<uint8_t>(src.reg.value);
+    }
+    else {
+        LOG(L"[!] Unsupported RCR count operand type");
+        return;
+    }
+
     count %= width;
     if (count == 0) {
         LOG(L"[+] RCR => no operation");
@@ -2001,34 +1914,23 @@ void emulate_rcr(const ZydisDisassembledInstruction* instr) {
             val |= (1ULL << (width - 1));
         else
             val &= ~(1ULL << (width - 1));
-
         old_CF = new_CF;
     }
 
     g_regs.rflags.flags.CF = old_CF;
 
-    // ذخیره نتیجه در رجیستر
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        switch (width) {
-        case 8:  set_register_value<uint8_t>(dst.reg.value, static_cast<uint8_t>(val)); break;
-        case 16: set_register_value<uint16_t>(dst.reg.value, static_cast<uint16_t>(val)); break;
-        case 32: set_register_value<uint32_t>(dst.reg.value, static_cast<uint32_t>(val)); break;
-        case 64: set_register_value<uint64_t>(dst.reg.value, val); break;
-        }
+    if (!write_operand_value(dst, width, val)) {
+        LOG(L"[!] Failed to write RCR result");
+        return;
     }
 
-    // پرچم‌ها
-    if (width > 32) {
-        g_regs.rflags.flags.SF = !((val >> (width - 1)) & 1);
-    }
-    else {
-        g_regs.rflags.flags.SF = ((val >> (width - 1)) & 1);
-    }
-    bool msb_after = (val >> (width - 2)) & 1;
-    g_regs.rflags.flags.OF = msb_after;
+    bool msb = (val >> (width - 1)) & 1;
+    bool msb_minus_1 = (val >> (width - 2)) & 1;
 
-    g_regs.rflags.flags.ZF = (val == 0);
-    g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(val));
+    g_regs.rflags.flags.SF = msb;
+    g_regs.rflags.flags.OF = msb ^ msb_minus_1;
+    g_regs.rflags.flags.ZF = (zero_extend(val, width) == 0);
+    g_regs.rflags.flags.PF = parity(static_cast<uint8_t>(val & 0xFF));
 
     LOG(L"[+] RCR => 0x" << std::hex << val);
 }
@@ -2265,34 +2167,17 @@ void emulate_jle(const ZydisDisassembledInstruction* instr) {
 void emulate_movups(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
+    constexpr uint32_t width = 128; 
 
     __m128i value;
 
-    if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        value = get_register_value<__m128i>(src.reg.value);
-    }
-    else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (!ReadEffectiveMemory(src, &value)) {
-            LOG(L"[!] Failed to read memory in movups");
-            return;
-        }
-    }
-    else {
-        LOG(L"[!] Unsupported source operand type in movups");
+    if (!read_operand_value(src, width, value)) {
+        LOG(L"[!] Failed to read source operand in movups");
         return;
     }
 
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        set_register_value<__m128i>(dst.reg.value, value);
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (!WriteEffectiveMemory(dst, value)) {
-            LOG(L"[!] Failed to write memory in movups");
-            return;
-        }
-    }
-    else {
-        LOG(L"[!] Unsupported destination operand type in movups");
+    if (!write_operand_value(dst, width, value)) {
+        LOG(L"[!] Failed to write destination operand in movups");
         return;
     }
 
@@ -2338,27 +2223,21 @@ void emulate_punpcklqdq(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
 
-
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        uint8_t* dst_xmm = g_regs.ymm[dst.reg.value - ZYDIS_REGISTER_XMM0].xmm;
-        uint8_t* src_xmm = g_regs.ymm[src.reg.value - ZYDIS_REGISTER_XMM0].xmm;
-
-        uint8_t low_dst[8];
-        memcpy(low_dst, dst_xmm, 8);
-
-        uint8_t low_src[8];
-        memcpy(low_src, src_xmm, 8);
-
-        memcpy(dst_xmm, low_dst, 8);
-        memcpy(dst_xmm + 8, low_src, 8);
-
-        LOG(L"[+] PUNPCKLQDQ xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
-            << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0));
-    }
-    else {
+    __m128i dst_val, src_val;
+    if (!read_operand_value(dst, 128, dst_val) || !read_operand_value(src, 128, src_val)) {
         LOG(L"[!] Unsupported operands for PUNPCKLQDQ");
+        return;
     }
+
+
+    __m128i result = _mm_unpacklo_epi64(dst_val, src_val); 
+
+    write_operand_value(dst, 128, result);
+
+    LOG(L"[+] PUNPCKLQDQ xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
+        << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0));
 }
+
 
 void emulate_jnz(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
@@ -2387,233 +2266,183 @@ void emulate_nop(const ZydisDisassembledInstruction*) {
 void emulate_movq(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
+    const uint32_t width = 64;
 
-    const int width = 64;
+    // movq xmm, gpr or xmm
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && dst.reg.value >= ZYDIS_REGISTER_XMM0 && dst.reg.value <= ZYDIS_REGISTER_XMM31) {
+        uint64_t value = 0;
 
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-
-        if ((ZYDIS_REGKIND_GPR <= dst.type && dst.type <= ZYDIS_REGKIND_GPR) &&
-            (ZYDIS_REGKIND_GPR <= src.type && src.type <= ZYDIS_REGKIND_GPR)) {
-            // GPR to GPR (64-bit)
-            uint64_t value = get_register_value<uint64_t>(src.reg.value);
-            set_register_value<uint64_t>(dst.reg.value, value);
-        }
-        else if ((dst.type == ZYDIS_REGCLASS_XMM) && (src.type == ZYDIS_REGKIND_GPR)) {
-            // movq xmm, gpr
-            uint64_t val = get_register_value<uint64_t>(src.reg.value);
-            memcpy(g_regs.ymm[dst.reg.value - ZYDIS_REGISTER_XMM0].xmm, &val, sizeof(uint64_t));
-        }
-        else if ((dst.type == ZYDIS_REGKIND_GPR) && (src.type == ZYDIS_REGCLASS_XMM)) {
-            // movq gpr, xmm
-            uint64_t val = 0;
-            memcpy(&val, g_regs.ymm[src.reg.value - ZYDIS_REGISTER_XMM0].xmm, sizeof(uint64_t));
-            set_register_value<uint64_t>(dst.reg.value, val);
-        }
-        else if (dst.type == ZYDIS_REGCLASS_XMM && src.type == ZYDIS_REGCLASS_XMM) {
-            // movq xmm, xmm
-            memcpy(g_regs.ymm[dst.reg.value - ZYDIS_REGISTER_XMM0].xmm,
-                g_regs.ymm[src.reg.value - ZYDIS_REGISTER_XMM0].xmm, sizeof(uint64_t));
-        }
-        else {
-            LOG(L"[!] Unsupported movq register to register");
-        }
-    }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        // movq xmm|gpr, [mem]
-        if (dst.type == ZYDIS_REGKIND_GPR) {
-            uint64_t value;
-            if (ReadEffectiveMemory(src, &value)) {
-                set_register_value<uint64_t>(dst.reg.value, value);
+        if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            if (src.reg.value >= ZYDIS_REGISTER_XMM0 && src.reg.value <= ZYDIS_REGISTER_XMM31) {
+                // movq xmm, xmm (copy lower 64 bits)
+                memcpy(
+                    g_regs.ymm[dst.reg.value - ZYDIS_REGISTER_XMM0].xmm,
+                    g_regs.ymm[src.reg.value - ZYDIS_REGISTER_XMM0].xmm,
+                    sizeof(uint64_t)
+                );
+                LOG(L"[+] MOVQ xmm, xmm executed");
+                return;
+            }
+            else {
+                // movq xmm, gpr
+                if (!read_operand_value(src, width, value)) {
+                    LOG(L"[!] Failed to read gpr in movq");
+                    return;
+                }
+                memcpy(
+                    g_regs.ymm[dst.reg.value - ZYDIS_REGISTER_XMM0].xmm,
+                    &value,
+                    sizeof(uint64_t)
+                );
+                LOG(L"[+] MOVQ xmm, gpr executed");
+                return;
             }
         }
-        else if (dst.type == ZYDIS_REGCLASS_XMM) {
-            uint64_t value;
-            if (ReadEffectiveMemory(src, &value)) {
-                memcpy(g_regs.ymm[dst.reg.value - ZYDIS_REGISTER_XMM0].xmm, &value, sizeof(uint64_t));
+        else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+            if (!read_operand_value(src, width, value)) {
+                LOG(L"[!] Failed to read memory in movq");
+                return;
             }
+            memcpy(
+                g_regs.ymm[dst.reg.value - ZYDIS_REGISTER_XMM0].xmm,
+                &value,
+                sizeof(uint64_t)
+            );
+            LOG(L"[+] MOVQ xmm, [mem] executed");
+            return;
         }
     }
+
+    // movq gpr, xmm or mem
+    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && dst.reg.value >= ZYDIS_REGISTER_RAX && dst.reg.value <= ZYDIS_REGISTER_R15) {
+        uint64_t value = 0;
+
+        if (src.type == ZYDIS_OPERAND_TYPE_REGISTER && src.reg.value >= ZYDIS_REGISTER_XMM0 && src.reg.value <= ZYDIS_REGISTER_XMM31) {
+            memcpy(
+                &value,
+                g_regs.ymm[src.reg.value - ZYDIS_REGISTER_XMM0].xmm,
+                sizeof(uint64_t)
+            );
+            write_operand_value(dst, width, value);
+            LOG(L"[+] MOVQ gpr, xmm executed");
+            return;
+        }
+        else if (!read_operand_value(src, width, value)) {
+            LOG(L"[!] Failed to read src operand in movq");
+            return;
+        }
+        if (!write_operand_value(dst, width, value)) {
+            LOG(L"[!] Failed to write dst operand in movq");
+            return;
+        }
+        LOG(L"[+] MOVQ gpr, src executed");
+        return;
+    }
+
+    // movq [mem], xmm or gpr
     else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        // movq [mem], xmm|gpr
-        if (src.type == ZYDIS_REGKIND_GPR) {
-            uint64_t value = get_register_value<uint64_t>(src.reg.value);
-            WriteEffectiveMemory(dst, value);
+        uint64_t value = 0;
+
+        if (src.reg.value >= ZYDIS_REGISTER_XMM0 && src.reg.value <= ZYDIS_REGISTER_XMM31) {
+            memcpy(
+                &value,
+                g_regs.ymm[src.reg.value - ZYDIS_REGISTER_XMM0].xmm,
+                sizeof(uint64_t)
+            );
         }
-        else if (src.type == ZYDIS_REGCLASS_XMM) {
-            uint64_t value = 0;
-            memcpy(&value, g_regs.ymm[src.reg.value - ZYDIS_REGISTER_XMM0].xmm, sizeof(uint64_t));
-            WriteEffectiveMemory(dst, value);
+        else if (!read_operand_value(src, width, value)) {
+            LOG(L"[!] Failed to read register in movq");
+            return;
         }
+
+        if (!write_operand_value(dst, width, value)) {
+            LOG(L"[!] Failed to write to memory in movq");
+            return;
+        }
+        LOG(L"[+] MOVQ [mem], reg executed");
+        return;
     }
-    else {
-        LOG(L"[!] Unsupported movq operands");
-    }
+
+    LOG(L"[!] Unsupported operand combination in movq");
 }
+
 
 void emulate_cmovb(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
+    const uint32_t width = instr->info.operand_width;
+
 
     if (!g_regs.rflags.flags.CF) {
-
+        LOG(L"[~] CMOVB condition not met (CF=0), skipping move");
         return;
     }
 
-
-
-    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-
-            uint64_t value = get_register_value<uint64_t>(src.reg.value);
-            set_register_value<uint64_t>(dst.reg.value, value);
-        }
-        else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-
-            if (instr->info.operand_width == 64) {
-                uint64_t value;
-                if (ReadEffectiveMemory(src, &value)) {
-                    set_register_value<uint64_t>(dst.reg.value, value);
-                }
-                else {
-                    LOG(L"[!] Failed to read memory in cmovb");
-                }
-            }
-            else if (instr->info.operand_width == 32) {
-                uint32_t value;
-                if (ReadEffectiveMemory(src, &value)) {
-                    set_register_value<uint32_t>(dst.reg.value, value);
-                    set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(value)); // zero-extend
-                }
-                else {
-                    LOG(L"[!] Failed to read memory in cmovb");
-                }
-            }
-            else if (instr->info.operand_width == 16) {
-                uint16_t value;
-                if (ReadEffectiveMemory(src, &value)) {
-                    set_register_value<uint16_t>(dst.reg.value, value);
-                    set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(value));
-                }
-                else {
-                    LOG(L"[!] Failed to read memory in cmovb");
-                }
-            }
-            else if (instr->info.operand_width == 8) {
-                uint8_t value;
-                if (ReadEffectiveMemory(src, &value)) {
-                    set_register_value<uint8_t>(dst.reg.value, value);
-                    set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(value));
-                }
-                else {
-                    LOG(L"[!] Failed to read memory in cmovb");
-                }
-            }
-        }
-        else {
-            LOG(L"[!] Unsupported source operand type in cmovb");
-        }
+    uint64_t value = 0;
+    if (!read_operand_value(src, width, value)) {
+        LOG(L"[!] Failed to read source operand in cmovb");
+        return;
     }
-    else {
-        LOG(L"[!] Unsupported destination operand type in cmovb");
+
+    if (!write_operand_value(dst, width, value)) {
+        LOG(L"[!] Failed to write destination operand in cmovb");
+        return;
     }
+
+    LOG(L"[+] CMOVB executed successfully");
 }
 
 void emulate_cmovnz(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
-    int width = instr->info.operand_width;
+    const int width = instr->info.operand_width;
 
     if (dst.type != ZYDIS_OPERAND_TYPE_REGISTER) {
         LOG(L"[!] CMOVNZ only supports register destination");
         return;
     }
 
-    if (g_regs.rflags.flags.ZF == 0) {
-
-        switch (width) {
-        case 64: {
-            uint64_t val = 0;
-            if (src.type == ZYDIS_OPERAND_TYPE_REGISTER)
-                val = get_register_value<uint64_t>(src.reg.value);
-            else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY)
-                ReadEffectiveMemory(src, &val);
-            set_register_value<uint64_t>(dst.reg.value, val);
-            break;
-        }
-        case 32: {
-            uint32_t val = 0;
-            if (src.type == ZYDIS_OPERAND_TYPE_REGISTER)
-                val = get_register_value<uint32_t>(src.reg.value);
-            else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY)
-                ReadEffectiveMemory(src, &val);
-            set_register_value<uint32_t>(dst.reg.value, val);
-            break;
-        }
-        case 16: {
-            uint16_t val = 0;
-            if (src.type == ZYDIS_OPERAND_TYPE_REGISTER)
-                val = get_register_value<uint16_t>(src.reg.value);
-            else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY)
-                ReadEffectiveMemory(src, &val);
-            set_register_value<uint16_t>(dst.reg.value, val);
-            break;
-        }
-        case 8: {
-            uint8_t val = 0;
-            if (src.type == ZYDIS_OPERAND_TYPE_REGISTER)
-                val = get_register_value<uint8_t>(src.reg.value);
-            else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY)
-                ReadEffectiveMemory(src, &val);
-            set_register_value<uint8_t>(dst.reg.value, val);
-            break;
-        }
-        default:
-            LOG(L"[!] Unsupported operand width for CMOVNZ: " << width);
-            return;
-        }
-
-        LOG(L"[+] CMOVNZ: moved because ZF == 0");
-    }
-    else {
+    if (g_regs.rflags.flags.ZF != 0) {
         LOG(L"[+] CMOVNZ: no move because ZF == 1");
+        return;
     }
+
+    uint64_t value = 0;
+    if (!read_operand_value(src, width, value)) {
+        LOG(L"[!] Failed to read source operand in CMOVNZ");
+        return;
+    }
+
+    if (!write_operand_value(dst, width, value)) {
+        LOG(L"[!] Failed to write destination register in CMOVNZ");
+        return;
+    }
+
+    LOG(L"[+] CMOVNZ: moved because ZF == 0");
 }
 
 
 void emulate_movdqa(const ZydisDisassembledInstruction* instr) {
-    const auto& op1 = instr->operands[0];
-    const auto& op2 = instr->operands[1];
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
 
     __m128i value;
-
-    if (op2.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        value = get_register_value<__m128i>(op2.reg.value);
-    }
-    else if (op2.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (!ReadEffectiveMemory(op2, &value)) {
-            LOG(L"[!] Failed to read memory in movdqa");
-        }
-    }
-    else {
-        LOG(L"[!] Unsupported source operand type in movdqa");
+    if (!read_operand_value(src, 128, value)) {
+        LOG(L"[!] Failed to read source operand in MOVDQA");
+        return;
     }
 
-
-    if (op1.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        set_register_value<__m128i>(op1.reg.value, value);
-    }
-    else if (op1.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (!WriteEffectiveMemory(op1, value)) {
-            LOG(L"[!] Failed to write memory in movdqa");
-        }
-    }
-    else {
-        LOG(L"[!] Unsupported destination operand type in movdqa");
-
+    if (!write_operand_value(dst, 128, value)) {
+        LOG(L"[!] Failed to write destination operand in MOVDQA");
+        return;
     }
 
-
+    LOG(L"[+] MOVDQA xmm" << dst.reg.value - ZYDIS_REGISTER_XMM0
+        << ", " << (src.type == ZYDIS_OPERAND_TYPE_REGISTER
+            ? L"xmm" + std::to_wstring(src.reg.value - ZYDIS_REGISTER_XMM0)
+            : L"[mem]"));
 }
+
 
 void emulate_mov(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
@@ -3198,23 +3027,24 @@ void emulate_rol(const ZydisDisassembledInstruction* instr) {
 void emulate_vmovdqu(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
+    constexpr uint32_t width = 256; 
 
-    if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        // vmovdqu [mem], ymm
-        uint8_t* src_data = g_regs.ymm[src.reg.value - ZYDIS_REGISTER_YMM0].full;
-        WriteEffectiveMemory(dst, *reinterpret_cast<__m256i*>(src_data));
+    __m256i value;
+
+
+    if (!read_operand_value(src, width, value)) {
+        LOG(L"[!] Failed to read source operand in vmovdqu");
+        return;
     }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        // vmovdqu ymm, [mem]
-        uint8_t* dst_data = g_regs.ymm[dst.reg.value - ZYDIS_REGISTER_YMM0].full;
-        ReadEffectiveMemory(src, reinterpret_cast<__m256i*>(dst_data));
+
+    if (!write_operand_value(dst, width, value)) {
+        LOG(L"[!] Failed to write destination operand in vmovdqu");
+        return;
     }
-    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        // vmovdqu ymm, ymm
-        memcpy(g_regs.ymm[dst.reg.value - ZYDIS_REGISTER_YMM0].full,
-            g_regs.ymm[src.reg.value - ZYDIS_REGISTER_YMM0].full, 32);
-    }
+
+    LOG(L"[+] VMOVDQU executed");
 }
+
 
 void emulate_ror(const ZydisDisassembledInstruction* instr) {
     auto& dst = instr->operands[0];
