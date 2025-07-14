@@ -1322,24 +1322,23 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-    // تعیین سایز منبع برای خواندن
     uint8_t src_size = src.size;
     if (src.type == ZYDIS_OPERAND_TYPE_MEMORY && src_size != 1 && src_size != 2 && src_size != 4) {
-        // برای حافظه معمولا 2 بایت در نظر می‌گیریم
+
         src_size = 2;
         LOG(L"[*] Inferred MOVSX memory source size = " << (int)src_size);
     }
 
-    // خواندن مقدار منبع به صورت signed با اندازه src_size * 8 بیت
+
     int64_t value = read_signed_operand(src, src_size * 8);
-    // اگر مقدار صفر برگشت یعنی خطا (احتمالا)
+
     if (value == 0 && !read_operand_value(src, src_size * 8, *(uint64_t*)nullptr)) {
-        // (اینجا میتونی چک دقیق‌تری انجام بدی ولی برای خلاصه این کافی است)
+
         LOG(L"[!] Failed to read MOVSX source operand");
         return;
     }
 
-    // نوشتن مقدار sign-extended شده به رجیستر مقصد بر اساس اندازه مقصد
+
     bool success = false;
     switch (dst_width) {
     case 64:
@@ -1348,7 +1347,7 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
     case 32:
         success = write_operand_value(dst, 32, static_cast<uint32_t>(value));
         if (success) {
-            // برای پاک کردن بیت‌های بالاتر، مقدار 64 بیت هم می‌نویسیم (در صورت نیاز)
+
             set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(static_cast<uint32_t>(value)));
         }
         break;
