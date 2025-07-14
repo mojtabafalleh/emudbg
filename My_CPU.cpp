@@ -19,6 +19,7 @@ uint64_t lastBreakpointAddr = 0;
 BYTE lastOrigByte = 0;
 PROCESS_INFORMATION pi;
 bool has_rep;
+bool brakpiont_hit;
 #define LOG_ENABLED 1
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
@@ -134,27 +135,9 @@ std::pair<uint64_t, uint64_t> div_128_by_64(uint64_t high, uint64_t low, uint64_
     return { quotient, remainder };
 }
 
-uint128_t mul_64x64_to_128(int64_t a, int64_t b) {
-    uint64_t a_low = (uint64_t)a & 0xFFFFFFFFULL;
-    uint64_t a_high = (uint64_t)a >> 32;
-    uint64_t b_low = (uint64_t)b & 0xFFFFFFFFULL;
-    uint64_t b_high = (uint64_t)b >> 32;
-
-
-    uint64_t low_low = a_low * b_low;
-    uint64_t low_high = a_low * b_high;
-    uint64_t high_low = a_high * b_low;
-    uint64_t high_high = a_high * b_high;
-
-
-    uint64_t carry = ((low_low >> 32) + (low_high & 0xFFFFFFFF) + (high_low & 0xFFFFFFFF)) >> 32;
-
+uint128_t mul_64x64_to_128(uint64_t a, uint64_t b) {
     uint128_t result;
-
-    result.low = low_low + ((low_high & 0xFFFFFFFF) << 32) + ((high_low & 0xFFFFFFFF) << 32);
-
-    result.high = high_high + (low_high >> 32) + (high_low >> 32) + carry;
-
+    result.low = _umul128(a, b, &result.high);
     return result;
 }
 // ------------------- Memory I/O Helpers -------------------
@@ -3202,6 +3185,7 @@ void start_emulation(uint64_t startAddress) {
                 uint64_t value = 0;
                 ReadMemory(g_regs.rsp.q, &value, 8);
                 SetSingleBreakpointAndEmulate(pi.hProcess, value, pi.hThread);
+                address = g_regs.rip;
             }
 
         }
@@ -3211,6 +3195,7 @@ void start_emulation(uint64_t startAddress) {
             break;
         }
     }
+
 }
 
 
@@ -3311,7 +3296,7 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
 
     lastBreakpointAddr = newAddress;
     lastOrigByte = origByte;
-
+    brakpiont_hit = 0;
     CONTEXT ctx = { 0 };
     ctx.ContextFlags = CONTEXT_FULL;
     if (GetThreadContext(hThread, &ctx)) {
@@ -3363,7 +3348,9 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
     DEBUG_EVENT dbgEvent;
     while (true) {
         if (!WaitForDebugEvent(&dbgEvent, INFINITE)) break;
-
+        if (brakpiont_hit) {
+            break;
+        }
         DWORD continueStatus = DBG_CONTINUE;
 
         if (dbgEvent.dwDebugEventCode == EXCEPTION_DEBUG_EVENT) {
@@ -3416,14 +3403,14 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
                         memcpy(g_regs.ymm[13].xmm, &ctx.Xmm13, 16);
                         memcpy(g_regs.ymm[14].xmm, &ctx.Xmm14, 16);
                         memcpy(g_regs.ymm[15].xmm, &ctx.Xmm15, 16);
-
+                        brakpiont_hit = 1;
 
 
                     }
 
                     // Emulate from breakpoint address
-                    start_emulation(exAddr);
                     break;
+
                 }
             }
         }
@@ -3433,7 +3420,6 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
         }
 
     }
-
 
 
 }
@@ -3564,6 +3550,8 @@ int wmain(int argc, wchar_t* argv[]) {
 
     while (true) {
         if (!WaitForDebugEvent(&dbgEvent, INFINITE)) break;
+        if(brakpiont_hit) break;
+
         DWORD continueStatus = DBG_CONTINUE;
         switch (dbgEvent.dwDebugEventCode) {
         case CREATE_PROCESS_DEBUG_EVENT: {
@@ -3640,19 +3628,24 @@ int wmain(int argc, wchar_t* argv[]) {
                     memcpy(g_regs.ymm[13].xmm, &ctx.Xmm13, 16);
                     memcpy(g_regs.ymm[14].xmm, &ctx.Xmm14, 16);
                     memcpy(g_regs.ymm[15].xmm, &ctx.Xmm15, 16);
-
-                    start_emulation(exAddr);
+                    start_emulation(g_regs.rip);
+               
                 }
+
             }
-            break;
+     break;
         }
         case EXIT_PROCESS_DEBUG_EVENT:
-            goto cleanup;
+            break;
         }
        ContinueDebugEvent(dbgEvent.dwProcessId, dbgEvent.dwThreadId, continueStatus);
     }
-cleanup:
+
+
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+
+
+
     return 0;
 }
