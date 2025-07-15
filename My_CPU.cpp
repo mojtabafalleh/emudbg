@@ -20,14 +20,14 @@ BYTE lastOrigByte = 0;
 PROCESS_INFORMATION pi;
 bool has_rep;
 bool brakpiont_hit;
-#define LOG_ENABLED 0
+#define LOG_ENABLED 1
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
 #define LOG(x)
 #endif
 
-#define DB_ENABLED 0
+#define DB_ENABLED 1
 #if DB_ENABLED
 bool is_cpuid;
 void SingleStepAndCompare(HANDLE hProcess, HANDLE hThread);
@@ -237,7 +237,6 @@ bool AccessEffectiveMemory(const ZydisDecodedOperand& op, T* inout, bool write) 
 
     return success;
 }
-
 
 template<typename T>
 bool ReadEffectiveMemory(const ZydisDecodedOperand& op, T* out) {
@@ -852,34 +851,76 @@ void emulate_mul(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-    // MUL is unsigned multiplication
+    // Mask both operands to correct width before multiplication
+    switch (width) {
+    case 8:
+        val1 &= 0xFF;
+        val2 &= 0xFF;
+        break;
+    case 16:
+        val1 &= 0xFFFF;
+        val2 &= 0xFFFF;
+        break;
+    case 32:
+        val1 &= 0xFFFFFFFF;
+        val2 &= 0xFFFFFFFF;
+        break;
+    case 64:
+        // No mask needed
+        break;
+    }
+
+    // MUL is unsigned multiplication: result width = twice operand width
     uint128_t result = mul_64x64_to_128(val1, val2);
 
     switch (width) {
     case 8:
-        g_regs.rax.l = static_cast<uint8_t>(result.low);
-        g_regs.rax.h = static_cast<uint8_t>(result.low >> 8);
+        g_regs.rax.l = static_cast<uint8_t>(result.low & 0xFF);
+        g_regs.rax.h = static_cast<uint8_t>((result.low >> 8) & 0xFF);
         break;
+
     case 16:
-        g_regs.rax.w = static_cast<uint16_t>(result.low);
-        g_regs.rdx.w = static_cast<uint16_t>(result.low >> 16);
+        g_regs.rax.w = static_cast<uint16_t>(result.low & 0xFFFF);
+        g_regs.rdx.w = static_cast<uint16_t>((result.low >> 16) & 0xFFFF);
         break;
+
     case 32:
-        g_regs.rax.d = static_cast<uint32_t>(result.low);
-        g_regs.rdx.d = static_cast<uint32_t>(result.high);
+        g_regs.rax.d = static_cast<uint32_t>(result.low & 0xFFFFFFFF);
+        g_regs.rdx.d = static_cast<uint32_t>((result.low >> 32) & 0xFFFFFFFF);
         break;
+
     case 64:
         g_regs.rax.q = result.low;
         g_regs.rdx.q = result.high;
         break;
     }
 
-    LOG(L"[+] MUL (" << width << L"bit) => RDX:RAX = 0x" << std::hex << result.high << L":" << result.low);
+    LOG(L"[+] MUL (" << width << L"bit) => RDX:RAX = 0x"
+        << std::hex << result.high << L":" << result.low);
 
-    // Update flags: CF and OF set if upper half != 0
-    g_regs.rflags.flags.CF = g_regs.rflags.flags.OF = (result.high != 0);
-    // ZF, SF, PF undefined for MUL
+    // Update CF and OF: set if upper half is not zero
+    bool upper_nonzero = false;
+    switch (width) {
+    case 8:
+        upper_nonzero = (g_regs.rax.h != 0);
+        break;
+    case 16:
+        upper_nonzero = (g_regs.rdx.w != 0);
+        break;
+    case 32:
+        upper_nonzero = (g_regs.rdx.d != 0);
+        break;
+    case 64:
+        upper_nonzero = (g_regs.rdx.q != 0);
+        break;
+    }
+
+    g_regs.rflags.flags.CF = upper_nonzero;
+    g_regs.rflags.flags.OF = upper_nonzero;
+
+    // ZF, SF, PF are undefined after MUL, no update needed
 }
+
 
 void emulate_imul(const ZydisDisassembledInstruction* instr) {
     const auto& ops = instr->operands;
