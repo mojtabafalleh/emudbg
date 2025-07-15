@@ -1102,6 +1102,31 @@ void emulate_xor(const ZydisDisassembledInstruction* instr) {
         << ", AF=" << g_regs.rflags.flags.AF);
 }
 
+void emulate_cmovnl(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    uint32_t width = instr->info.operand_width;
+
+    LOG(L"[CMOVNL] SF=" << g_regs.rflags.flags.SF << " OF=" << g_regs.rflags.flags.OF );
+
+    if (g_regs.rflags.flags.SF == g_regs.rflags.flags.OF) {
+        uint64_t value = 0;
+        if (!read_operand_value(src, width, value)) {
+            LOG(L"[!] Failed to read CMOVNL source operand");
+            return;
+        }
+
+        if (!write_operand_value(dst, width, value)) {
+            LOG(L"[!] Failed to write CMOVNL destination operand");
+            return;
+        }
+
+        LOG(L"[+] CMOVNL executed: moved 0x" << std::hex << value);
+    }
+    else {
+        LOG(L"[+] CMOVNL skipped: condition not met");
+    }
+}
 
 
 void emulate_cdqe(const ZydisDisassembledInstruction* instr) {
@@ -1220,40 +1245,24 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
 
     uint8_t src_size = src.size;
     if (src.type == ZYDIS_OPERAND_TYPE_MEMORY && src_size != 1 && src_size != 2 && src_size != 4) {
-
         src_size = 2;
         LOG(L"[*] Inferred MOVSX memory source size = " << (int)src_size);
     }
 
-
-    int64_t value = read_signed_operand(src, src_size * 8);
-
-    if (value == 0 && !read_operand_value(src, src_size * 8, *(uint64_t*)nullptr)) {
-
+    int64_t value = 0;
+    if (!read_operand_value(src, src_size * 8, value)) {
         LOG(L"[!] Failed to read MOVSX source operand");
         return;
     }
 
-
-    bool success = false;
-    switch (dst_width) {
-    case 64:
-        success = write_operand_value(dst, 64, static_cast<uint64_t>(value));
-        break;
-    case 32:
-        success = write_operand_value(dst, 32, static_cast<uint32_t>(value));
-        if (success) {
-
-            set_register_value<uint64_t>(dst.reg.value, static_cast<uint64_t>(static_cast<uint32_t>(value)));
-        }
-        break;
-    case 16:
-        success = write_operand_value(dst, 16, static_cast<uint16_t>(value));
-        break;
-    default:
-        LOG(L"[!] Unsupported MOVSX destination width: " << dst_width);
-        return;
+    // Sign extend based on src_size
+    switch (src_size * 8) {
+    case 8:  value = static_cast<int8_t>(value); break;
+    case 16: value = static_cast<int16_t>(value); break;
+    case 32: value = static_cast<int32_t>(value); break;
     }
+
+    bool success = write_operand_value(dst, dst_width, static_cast<uint64_t>(value));
 
     if (!success) {
         LOG(L"[!] Failed to write MOVSX result");
@@ -1263,6 +1272,28 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] MOVSX: Sign-extended 0x" << std::hex << value
         << L" to " << dst_width << L" bits => "
         << ZydisRegisterGetString(dst.reg.value));
+}
+
+
+void emulate_movaps(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+
+    __m128 value;
+    if (!read_operand_value(src, 128, value)) {
+        LOG(L"[!] Failed to read source operand in MOVAPS");
+        return;
+    }
+
+    if (!write_operand_value(dst, 128, value)) {
+        LOG(L"[!] Failed to write destination operand in MOVAPS");
+        return;
+    }
+
+    LOG(L"[+] MOVAPS xmm" << dst.reg.value - ZYDIS_REGISTER_XMM0
+        << ", " << (src.type == ZYDIS_OPERAND_TYPE_REGISTER
+            ? L"xmm" + std::to_wstring(src.reg.value - ZYDIS_REGISTER_XMM0)
+            : L"[mem]"));
 }
 
 
@@ -2338,6 +2369,29 @@ void emulate_movdqa(const ZydisDisassembledInstruction* instr) {
             : L"[mem]"));
 }
 
+void emulate_cmovs(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0], src = instr->operands[1];
+    uint8_t width = instr->info.operand_width;
+
+    if (g_regs.rflags.flags.SF == 1) {
+        uint64_t val = 0;
+
+        if (!read_operand_value(src, width, val)) {
+            LOG(L"[!] Failed to read source operand in CMOVS");
+            return;
+        }
+
+        if (!write_operand_value(dst, width, val)) {
+            LOG(L"[!] Failed to write destination operand in CMOVS");
+            return;
+        }
+
+        LOG(L"[+] CMOVS executed: moved value to destination");
+    }
+    else {
+        LOG(L"[+] CMOVS skipped: SF == 0");
+    }
+}
 
 void emulate_mov(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0], src = instr->operands[1];
@@ -2405,6 +2459,22 @@ void emulate_sub(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] SUB => 0x" << std::hex << result);
 }
 
+void emulate_jnle(const ZydisDisassembledInstruction* instr) {
+    const auto& op = instr->operands[0];
+    if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        if ((g_regs.rflags.flags.ZF == 0) && (g_regs.rflags.flags.SF == g_regs.rflags.flags.OF)) {
+            g_regs.rip = op.imm.value.s;
+        }
+        else {
+            g_regs.rip += instr->info.length;
+        }
+        LOG(L"[+] JNLE to => 0x" << std::hex << g_regs.rip);
+    }
+    else {
+        LOG(L"[!] Unsupported operand type for JNLE");
+        g_regs.rip += instr->info.length;
+    }
+}
 
 
 void emulate_movzx(const ZydisDisassembledInstruction* instr) {
@@ -2740,6 +2810,22 @@ void emulate_cpuid(const ZydisDisassembledInstruction*) {
 
 
 }
+void emulate_js(const ZydisDisassembledInstruction* instr) {
+    const auto& op = instr->operands[0];
+    if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        if (g_regs.rflags.flags.SF == 1) {
+            g_regs.rip = op.imm.value.s;
+        }
+        else {
+            g_regs.rip += instr->info.length;
+        }
+        LOG(L"[+] JS to => 0x" << std::hex << g_regs.rip);
+    }
+    else {
+        LOG(L"[!] Unsupported operand type for JS");
+        g_regs.rip += instr->info.length;
+    }
+}
 
 
 void emulate_test(const ZydisDisassembledInstruction* instr) {
@@ -2972,6 +3058,23 @@ void emulate_ror(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] ROR => 0x" << std::hex << val);
 }
 
+void emulate_jnl(const ZydisDisassembledInstruction* instr) {
+    const auto& op = instr->operands[0];
+    if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        if (g_regs.rflags.flags.SF == g_regs.rflags.flags.OF) {
+            g_regs.rip = op.imm.value.s;
+        }
+        else {
+            g_regs.rip += instr->info.length;
+        }
+        LOG(L"[+] JNL to => 0x" << std::hex << g_regs.rip);
+    }
+    else {
+        LOG(L"[!] Unsupported operand type for JNL");
+        g_regs.rip += instr->info.length;
+    }
+}
+
 
 void emulate_setnz(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -3034,6 +3137,22 @@ void emulate_stosd(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] STOSD: Final RDI = 0x" << std::hex << g_regs.rdi.q);
 }
 
+void emulate_jns(const ZydisDisassembledInstruction* instr) {
+    const auto& op = instr->operands[0];
+    if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        if (g_regs.rflags.flags.SF == 0) {
+            g_regs.rip = op.imm.value.s;
+        }
+        else {
+            g_regs.rip += instr->info.length;
+        }
+        LOG(L"[+] JNS to => 0x" << std::hex << g_regs.rip);
+    }
+    else {
+        LOG(L"[!] Unsupported operand type for JNS");
+        g_regs.rip += instr->info.length;
+    }
+}
 
 // ------------------- Emulator Loop -------------------
 
@@ -3448,7 +3567,14 @@ int wmain(int argc, wchar_t* argv[]) {
         { ZYDIS_MNEMONIC_ADC, emulate_adc },
         { ZYDIS_MNEMONIC_STC, emulate_stc },
         { ZYDIS_MNEMONIC_STOSD, emulate_stosd },
-         { ZYDIS_MNEMONIC_STOSB, emulate_stosb },
+        { ZYDIS_MNEMONIC_STOSB, emulate_stosb },
+        { ZYDIS_MNEMONIC_MOVAPS, emulate_movaps },
+        { ZYDIS_MNEMONIC_JNLE, emulate_jnle },
+        { ZYDIS_MNEMONIC_JNL, emulate_jnl },
+        { ZYDIS_MNEMONIC_JS, emulate_js },
+        { ZYDIS_MNEMONIC_JNS, emulate_jns },
+        { ZYDIS_MNEMONIC_CMOVS, emulate_cmovs },
+        { ZYDIS_MNEMONIC_CMOVNL, emulate_cmovnl },
         
     };
 
