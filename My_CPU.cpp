@@ -20,14 +20,14 @@ BYTE lastOrigByte = 0;
 PROCESS_INFORMATION pi;
 bool has_rep;
 bool brakpiont_hit;
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
 #define LOG(x)
 #endif
 
-#define DB_ENABLED 1
+#define DB_ENABLED 0
 #if DB_ENABLED
 bool is_cpuid;
 void SingleStepAndCompare(HANDLE hProcess, HANDLE hThread);
@@ -827,7 +827,7 @@ void emulate_vzeroupper(const ZydisDisassembledInstruction* instr) {
 
 void emulate_mul(const ZydisDisassembledInstruction* instr) {
     const auto& operands = instr->operands;
-    int operand_count = instr->info.operand_count - 1;
+    int operand_count = instr->info.operand_count_visible;
     int width = instr->info.operand_width;
 
     if (operand_count != 1) {
@@ -835,30 +835,30 @@ void emulate_mul(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-    uint64_t val1_u = 0;
-    if (!read_operand_value(operands[0], width, val1_u)) {
+    uint64_t val1 = 0;
+    if (!read_operand_value(operands[0], width, val1)) {
         LOG(L"[!] Failed to read operand for MUL");
         return;
     }
 
-    int64_t val1 = static_cast<int64_t>(zero_extend(val1_u, width));
-    int64_t val2 = 0;
-
+    uint64_t val2 = 0;
     switch (width) {
-    case 8:  val2 = static_cast<int8_t>(g_regs.rax.l); break;
-    case 16: val2 = static_cast<int16_t>(g_regs.rax.w); break;
-    case 32: val2 = static_cast<int32_t>(g_regs.rax.d); break;
-    case 64: val2 = static_cast<int64_t>(g_regs.rax.q); break;
+    case 8:  val2 = g_regs.rax.l; break;
+    case 16: val2 = g_regs.rax.w; break;
+    case 32: val2 = g_regs.rax.d; break;
+    case 64: val2 = g_regs.rax.q; break;
     default:
         LOG(L"[!] Unsupported operand width for MUL");
         return;
     }
 
+    // MUL is unsigned multiplication
     uint128_t result = mul_64x64_to_128(val1, val2);
 
     switch (width) {
     case 8:
-        g_regs.rax.w = static_cast<uint16_t>(result.low);
+        g_regs.rax.l = static_cast<uint8_t>(result.low);
+        g_regs.rax.h = static_cast<uint8_t>(result.low >> 8);
         break;
     case 16:
         g_regs.rax.w = static_cast<uint16_t>(result.low);
@@ -876,13 +876,9 @@ void emulate_mul(const ZydisDisassembledInstruction* instr) {
 
     LOG(L"[+] MUL (" << width << L"bit) => RDX:RAX = 0x" << std::hex << result.high << L":" << result.low);
 
-    // Update flags
+    // Update flags: CF and OF set if upper half != 0
     g_regs.rflags.flags.CF = g_regs.rflags.flags.OF = (result.high != 0);
-    g_regs.rflags.flags.ZF = (result.low == 0);
-    g_regs.rflags.flags.SF = (result.low >> (width - 1)) & 1;
-
-    uint8_t lowbyte = static_cast<uint8_t>(result.low & 0xFF);
-    g_regs.rflags.flags.PF = !parity(lowbyte);
+    // ZF, SF, PF undefined for MUL
 }
 
 void emulate_imul(const ZydisDisassembledInstruction* instr) {
@@ -1262,51 +1258,45 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-
     uint8_t src_size = src.size;
-
-
-    if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-        if (src_size != 1 && src_size != 2 && src_size != 4) {
-
-            if (instr->info.mnemonic == ZYDIS_MNEMONIC_MOVSX) {
-
-                src_size = 1;
-                LOG(L"[*] Inferred MOVSX memory source size fixed to 1");
-            }
-            else {
-                src_size = 1; 
-            }
-        }
-    }
-
-    int64_t value = 0;
-    if (!read_operand_value(src, src_size * 8, value)) {
-        LOG(L"[!] Failed to read MOVSX source operand");
+    if (src_size == 0) {
+        LOG(L"[!] Source size is zero, cannot proceed");
         return;
     }
 
 
-    switch (src_size * 8) {
-    case 8:  value = static_cast<int8_t>(value); break;
-    case 16: value = static_cast<int16_t>(value); break;
-    case 32: value = static_cast<int32_t>(value); break;
+    uint64_t raw_value = 0;
+    if (!read_operand_value(src, src_size , raw_value)) {
+        LOG(L"[!] Failed to read MOVSX source operand");
+        return;
+    }
+
+    int64_t value = 0;
+    switch (src_size ) {
+    case 8:
+        value = static_cast<int8_t>(raw_value);
+        break;
+    case 16:
+        value = static_cast<int16_t>(raw_value);
+        break;
+    case 32:
+        value = static_cast<int32_t>(raw_value);
+        break;
     default:
         LOG(L"[!] Unexpected source size for MOVSX: " << (int)src_size);
         return;
     }
 
-    bool success = write_operand_value(dst, dst_width, static_cast<uint64_t>(value));
-    if (!success) {
+    if (!write_operand_value(dst, dst_width, static_cast<uint64_t>(value))) {
         LOG(L"[!] Failed to write MOVSX result");
         return;
     }
 
-    LOG(L"[+] MOVSX: Sign-extended 0x" << std::hex << value
-        << L" to " << dst_width << L" bits => "
+    LOG(L"[+] MOVSX: Sign-extended 0x" << std::hex << raw_value
+        << L" to 0x" << static_cast<uint64_t>(value)
+        << L" (" << dst_width << L" bits) => "
         << ZydisRegisterGetString(dst.reg.value));
 }
-
 
 
 void emulate_movaps(const ZydisDisassembledInstruction* instr) {
@@ -3279,7 +3269,9 @@ void start_emulation(uint64_t startAddress) {
             break;
 
         if (disasm.Disassemble(address, buffer, bytesRead)) {
+#if DB_ENABLED
             is_cpuid = 0;
+#endif
             const ZydisDisassembledInstruction* op = disasm.GetInstr();
             instr = op->info;
 
