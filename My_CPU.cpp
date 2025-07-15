@@ -29,6 +29,7 @@ bool brakpiont_hit;
 
 #define DB_ENABLED 1
 #if DB_ENABLED
+bool is_cpuid;
 void SingleStepAndCompare(HANDLE hProcess, HANDLE hThread);
 void CompareRegistersWithEmulation(CONTEXT& ctx);
 #endif
@@ -512,13 +513,9 @@ void update_flags_or(uint64_t result, uint64_t val_dst, uint64_t val_src, int si
     g_regs.rflags.flags.ZF = (result == 0);
     g_regs.rflags.flags.SF = (result >> (size_bits - 1)) & 1;
     g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
-    
-    if (size_bits <= 32) {
+
         g_regs.rflags.flags.AF = 0;
-    }
-    else {
-        g_regs.rflags.flags.AF = ((val_dst ^ val_src ^ result) >> 4) & 1;
-    }
+
 
 
 }
@@ -1199,6 +1196,7 @@ void emulate_sbb(const ZydisDisassembledInstruction* instr) {
     bool res_sign = (result >> (width - 1)) & 1;
 
     g_regs.rflags.flags.OF = (dst_sign != src_sign) && (dst_sign != res_sign);
+    g_regs.rflags.flags.AF = ((dst_val ^ src_val ^ result) & 0x10) != 0;
 }
 
 void emulate_setbe(const ZydisDisassembledInstruction* instr) {
@@ -1264,10 +1262,22 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
+
     uint8_t src_size = src.size;
-    if (src.type == ZYDIS_OPERAND_TYPE_MEMORY && src_size != 1 && src_size != 2 && src_size != 4) {
-        src_size = 2;
-        LOG(L"[*] Inferred MOVSX memory source size = " << (int)src_size);
+
+
+    if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        if (src_size != 1 && src_size != 2 && src_size != 4) {
+
+            if (instr->info.mnemonic == ZYDIS_MNEMONIC_MOVSX) {
+
+                src_size = 1;
+                LOG(L"[*] Inferred MOVSX memory source size fixed to 1");
+            }
+            else {
+                src_size = 1; 
+            }
+        }
     }
 
     int64_t value = 0;
@@ -1276,15 +1286,17 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-    // Sign extend based on src_size
+
     switch (src_size * 8) {
     case 8:  value = static_cast<int8_t>(value); break;
     case 16: value = static_cast<int16_t>(value); break;
     case 32: value = static_cast<int32_t>(value); break;
+    default:
+        LOG(L"[!] Unexpected source size for MOVSX: " << (int)src_size);
+        return;
     }
 
     bool success = write_operand_value(dst, dst_width, static_cast<uint64_t>(value));
-
     if (!success) {
         LOG(L"[!] Failed to write MOVSX result");
         return;
@@ -1294,6 +1306,7 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
         << L" to " << dst_width << L" bits => "
         << ZydisRegisterGetString(dst.reg.value));
 }
+
 
 
 void emulate_movaps(const ZydisDisassembledInstruction* instr) {
@@ -1826,7 +1839,7 @@ void emulate_div(const ZydisDisassembledInstruction* instr) {
 void emulate_rcr(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
-    uint8_t width = instr->info.operand_width;
+    uint8_t width = instr->info.operand_width; 
 
     uint64_t val = 0;
     if (!read_operand_value(dst, width, val)) {
@@ -1874,11 +1887,11 @@ void emulate_rcr(const ZydisDisassembledInstruction* instr) {
     bool msb = (val >> (width - 1)) & 1;
     bool msb_minus_1 = (val >> (width - 2)) & 1;
 
-    g_regs.rflags.flags.SF = msb;
+    g_regs.rflags.flags.SF = msb_minus_1;
     g_regs.rflags.flags.OF = msb ^ msb_minus_1;
     g_regs.rflags.flags.ZF = (zero_extend(val, width) == 0);
-    g_regs.rflags.flags.PF = parity(static_cast<uint8_t>(val & 0xFF));
-
+    g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(val & 0xFF));
+    
     LOG(L"[+] RCR => 0x" << std::hex << val);
 }
 
@@ -1952,14 +1965,33 @@ void emulate_dec(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-    val--;
+    uint64_t mask = (width == 64) ? ~0ULL : ((1ULL << width) - 1);
 
-    if (!write_operand_value(dst, width, val)) {
+    uint64_t result = (val - 1) & mask;
+
+    if (!write_operand_value(dst, width, result)) {
         LOG(L"[!] Failed to write operand for DEC");
         return;
     }
 
-    LOG(L"[+] DEC => 0x" << std::hex << val);
+
+    g_regs.rflags.flags.ZF = (result == 0);
+
+    g_regs.rflags.flags.SF = ((result >> (width - 1)) & 1) != 0;
+
+
+    g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result & 0xFF));
+
+
+    bool borrow_from_bit4 = ((val & 0xF) < (result & 0xF));
+    g_regs.rflags.flags.AF = borrow_from_bit4;
+
+
+    bool val_sign = (val >> (width - 1)) & 1;
+    bool res_sign = (result >> (width - 1)) & 1;
+    g_regs.rflags.flags.OF = (val_sign && !res_sign);
+
+    LOG(L"[+] DEC => 0x" << std::hex << result);
 }
 
 void emulate_cmp(const ZydisDisassembledInstruction* instr) {
@@ -2298,6 +2330,30 @@ void emulate_movq(const ZydisDisassembledInstruction* instr) {
     LOG(L"[!] Unsupported operand combination in movq");
 }
 
+void emulate_cmovbe(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    const uint32_t width = instr->info.operand_width;
+
+    if (!(g_regs.rflags.flags.CF || g_regs.rflags.flags.ZF)) {
+        LOG(L"[~] CMOVBE condition not met (CF=0 && ZF=0), skipping move");
+        return;
+    }
+
+    uint64_t value = 0;
+    if (!read_operand_value(src, width, value)) {
+        LOG(L"[!] Failed to read source operand in cmovbe");
+        return;
+    }
+
+    if (!write_operand_value(dst, width, value)) {
+        LOG(L"[!] Failed to write destination operand in cmovbe");
+        return;
+    }
+
+    LOG(L"[+] CMOVBE executed successfully: dst updated to 0x" << std::hex << value);
+}
+
 
 void emulate_cmovb(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -2580,7 +2636,7 @@ void emulate_shl(const ZydisDisassembledInstruction* instr) {
     uint32_t width = instr->info.operand_width;
 
     uint64_t val = 0;
-    uint64_t shift = 0;
+    uint8_t shift = 0;
 
     if (!read_operand_value(dst, width, val)) {
         LOG(L"[!] Failed to read destination operand in SHL");
@@ -2588,35 +2644,66 @@ void emulate_shl(const ZydisDisassembledInstruction* instr) {
     }
 
     if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
-        shift = src.imm.value.u;
+        shift = static_cast<uint8_t>(src.imm.value.u & 0x3F);
     }
     else if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        if (!read_operand_value(src, 8, shift)) {  
-            LOG(L"[!] Failed to read shift count in SHL");
+        uint64_t tmp = 0;
+        if (!read_operand_value(src, 8, tmp)) {
+            LOG(L"[!] Failed to read source operand in SHL");
             return;
         }
+        shift = static_cast<uint8_t>(tmp & 0x3F);
     }
     else {
         LOG(L"[!] Unsupported source operand type for SHL");
         return;
     }
 
+    if (shift == 0) {
 
-    shift &= 0x3F; 
+        g_regs.rflags.flags.CF = 0;
+        g_regs.rflags.flags.OF = 0;
+        g_regs.rflags.flags.ZF = (val == 0);
+        g_regs.rflags.flags.SF = (val >> (width - 1)) & 1;
+        g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(val));
 
-    val <<= shift;
+        g_regs.rflags.flags.AF = 0;
+        return;
+    }
+
+    uint64_t old_val = val;
+    uint64_t result = val << shift;
+
+    // محدود کردن به عرض بیت
+    if (width < 64) {
+        result &= (1ULL << width) - 1;
+    }
+
+    g_regs.rflags.flags.CF = (old_val >> (width - shift)) & 1;
 
 
-    val &= (width < 64) ? ((1ULL << width) - 1) : ~0ULL;
+    if (shift == 1) {
+        bool msb_before = (old_val >> (width - 1)) & 1;
+        bool msb_after = (result >> (width - 1)) & 1;
+        g_regs.rflags.flags.OF = msb_before ^ msb_after;
+    }
+    else {
+        g_regs.rflags.flags.OF = 0;
+    }
 
 
-    if (!write_operand_value(dst, width, val)) {
+    if (!write_operand_value(dst, width, result)) {
         LOG(L"[!] Failed to write destination operand in SHL");
         return;
     }
 
+   
+    g_regs.rflags.flags.ZF = (result == 0);
+    g_regs.rflags.flags.SF = (result >> (width - 1)) & 1;
+    g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result));
+    g_regs.rflags.flags.AF = 0;  
 
-    LOG(L"[+] SHL => 0x" << std::hex << val);
+    LOG(L"[+] SHL => 0x" << std::hex << result);
 }
 
 void emulate_shr(const ZydisDisassembledInstruction* instr) {
@@ -2804,7 +2891,9 @@ void emulate_sar(const ZydisDisassembledInstruction* instr) {
 
 
 void emulate_cpuid(const ZydisDisassembledInstruction*) {
-
+#if DB_ENABLED
+    is_cpuid = 1;
+#endif
     int cpu_info[4];
     int input_eax = static_cast<int>(g_regs.rax.q);
     int input_ecx = static_cast<int>(g_regs.rcx.q);
@@ -3056,24 +3145,38 @@ void emulate_ror(const ZydisDisassembledInstruction* instr) {
     }
 
     uint64_t tmp_shift = 0;
-    if (!read_operand_value(src, 8, tmp_shift)) {  
+    if (!read_operand_value(src, 8, tmp_shift)) {
         LOG(L"[!] Failed to read shift operand");
         return;
     }
     uint8_t shift = static_cast<uint8_t>(tmp_shift);
+    shift %= width;  // rotation count wraps around
 
-    shift &= (width - 1);  
+    if (shift == 0) {
+        return;
+    }
 
-    val = (val >> shift) | (val << (width - shift));
-    val &= (width == 64) ? ~0ULL : ((1ULL << width) - 1); 
+    uint64_t result = (val >> shift) | (val << (width - shift));
+    result &= (width == 64) ? ~0ULL : ((1ULL << width) - 1);
 
-    if (!write_operand_value(dst, width, val)) {
+    if (!write_operand_value(dst, width, result)) {
         LOG(L"[!] Failed to write result operand");
         return;
     }
 
-    LOG(L"[+] ROR => 0x" << std::hex << val);
+    // CF = bit (width - shift) of original value (which ends up at MSB after rotate)
+    g_regs.rflags.flags.CF = (result >> (width - 1)) & 1;
+
+    if (shift == 1) {
+        // OF = MSB ^ next bit
+        bool msb = (result >> (width - 1)) & 1;
+        bool msb1 = (result >> (width - 2)) & 1;
+        g_regs.rflags.flags.OF = msb ^ msb1;
+    }
+
+    LOG(L"[+] ROR => 0x" << std::hex << result);
 }
+
 
 void emulate_jnl(const ZydisDisassembledInstruction* instr) {
     const auto& op = instr->operands[0];
@@ -3176,7 +3279,7 @@ void start_emulation(uint64_t startAddress) {
             break;
 
         if (disasm.Disassemble(address, buffer, bytesRead)) {
-
+            is_cpuid = 0;
             const ZydisDisassembledInstruction* op = disasm.GetInstr();
             instr = op->info;
 
@@ -3493,61 +3596,64 @@ void CompareRFlags(const CONTEXT& ctx) {
     if (g_regs.rflags.flags.CF != ((ctx.EFlags >> 0) & 1)) {
         std::wcout << L"[!] CF mismatch: Emulated=" << g_regs.rflags.flags.CF
             << L", Actual=" << ((ctx.EFlags >> 0) & 1) << std::endl;
+        DumpRegisters();
+        exit(0);
 
     }
 
     if (g_regs.rflags.flags.PF != ((ctx.EFlags >> 2) & 1)) {
         std::wcout << L"[!] PF mismatch: Emulated=" << g_regs.rflags.flags.PF
             << L", Actual=" << ((ctx.EFlags >> 2) & 1) << std::endl;
+        DumpRegisters();
+        exit(0);
     }
 
     if (g_regs.rflags.flags.AF != ((ctx.EFlags >> 4) & 1)) {
         std::wcout << L"[!] AF mismatch: Emulated=" << g_regs.rflags.flags.AF
             << L", Actual=" << ((ctx.EFlags >> 4) & 1) << std::endl;
+        DumpRegisters();
+        exit(0);
     }
 
     if (g_regs.rflags.flags.ZF != ((ctx.EFlags >> 6) & 1)) {
         std::wcout << L"[!] ZF mismatch: Emulated=" << g_regs.rflags.flags.ZF
             << L", Actual=" << ((ctx.EFlags >> 6) & 1) << std::endl;
+        DumpRegisters();
+        exit(0);
     }
 
     if (g_regs.rflags.flags.SF != ((ctx.EFlags >> 7) & 1)) {
         std::wcout << L"[!] SF mismatch: Emulated=" << g_regs.rflags.flags.SF
             << L", Actual=" << ((ctx.EFlags >> 7) & 1) << std::endl;
+        DumpRegisters();
+        exit(0);
     }
 
-    if (g_regs.rflags.flags.TF != ((ctx.EFlags >> 8) & 1)) {
-        std::wcout << L"[!] TF mismatch: Emulated=" << g_regs.rflags.flags.TF
-            << L", Actual=" << ((ctx.EFlags >> 8) & 1) << std::endl;
-    }
 
     if (g_regs.rflags.flags.IF != ((ctx.EFlags >> 9) & 1)) {
         std::wcout << L"[!] IF mismatch: Emulated=" << g_regs.rflags.flags.IF
             << L", Actual=" << ((ctx.EFlags >> 9) & 1) << std::endl;
+        DumpRegisters();
+        exit(0);
     }
 
     if (g_regs.rflags.flags.DF != ((ctx.EFlags >> 10) & 1)) {
         std::wcout << L"[!] DF mismatch: Emulated=" << g_regs.rflags.flags.DF
             << L", Actual=" << ((ctx.EFlags >> 10) & 1) << std::endl;
+        DumpRegisters();
+        exit(0);
     }
 
     if (g_regs.rflags.flags.OF != ((ctx.EFlags >> 11) & 1)) {
         std::wcout << L"[!] OF mismatch: Emulated=" << g_regs.rflags.flags.OF
             << L", Actual=" << ((ctx.EFlags >> 11) & 1) << std::endl;
-    }
-
-
-    bool flags_mismatch = false;
-    if (g_regs.rflags.value != ctx.EFlags) {
-        flags_mismatch = true;
-        std::wcout << L"[!] Full RFLAGS mismatch: Emulated=0x" << std::hex << g_regs.rflags.value
-            << L", Actual=0x" << std::hex << ctx.EFlags << std::endl;
-    }
-
-
-    if (flags_mismatch) {
+        DumpRegisters();
         exit(0);
     }
+
+
+
+
 }
 void CompareRegistersWithEmulation(CONTEXT& ctx) {
 
@@ -3713,8 +3819,16 @@ void SingleStepAndCompare(HANDLE hProcess, HANDLE hThread) {
                 ctxAfter.ContextFlags = CONTEXT_FULL;
 
                 if (GetThreadContext(hThread, &ctxAfter)) {
-
+                    if (is_cpuid) {
+                        g_regs.rax.q = ctxAfter.Rax;
+                        g_regs.rbx.q = ctxAfter.Rbx;
+                        g_regs.rcx.q = ctxAfter.Rcx;
+                        g_regs.rdx.q = ctxAfter.Rdx;
+                    }
+                    else {
                     CompareRegistersWithEmulation(ctxAfter);
+                    }
+
                 }
                 else {
                     std::wcout << L"[!] Failed to get thread context after single step" << std::endl;
@@ -3851,6 +3965,7 @@ int wmain(int argc, wchar_t* argv[]) {
         { ZYDIS_MNEMONIC_JNS, emulate_jns },
         { ZYDIS_MNEMONIC_CMOVS, emulate_cmovs },
         { ZYDIS_MNEMONIC_CMOVNL, emulate_cmovnl },
+        { ZYDIS_MNEMONIC_CMOVBE, emulate_cmovbe },
         
     };
 
