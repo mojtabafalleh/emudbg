@@ -1008,30 +1008,34 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
         // برای overflow/carry باید بررسی sign extend قسمت high روی نتیجه 128 بیت انجام شود
         switch (width) {
         case 8: {
-            int16_t full_result = static_cast<int16_t>(result128.low);
-            int8_t low_part = static_cast<int8_t>(result128.low & 0xFF);
-            overflow = carry = (full_result != low_part);
+            int8_t low = static_cast<int8_t>(result128.low & 0xFF);
+            int8_t sign_extended = static_cast<int8_t>(result128.low & 0xFF);
+            int16_t full = static_cast<int16_t>(result128.low);
+            overflow = carry = (full != sign_extended);
             break;
         }
         case 16: {
-            int32_t full_result = static_cast<int32_t>(result128.low);
-            int16_t low_part = static_cast<int16_t>(result128.low & 0xFFFF);
-            overflow = carry = (full_result != low_part);
+            int16_t low = static_cast<int16_t>(result128.low & 0xFFFF);
+            int32_t sign_extended = static_cast<int32_t>(low);
+            int32_t full = static_cast<int32_t>(result128.low);
+            overflow = carry = (full != sign_extended);
             break;
         }
         case 32: {
-            int64_t full_result = static_cast<int64_t>(result128.low);
-            int32_t low_part = static_cast<int32_t>(result128.low & 0xFFFFFFFF);
-            overflow = carry = (full_result != low_part);
+            int32_t low = static_cast<int32_t>(result128.low & 0xFFFFFFFF);
+            int64_t sign_extended = static_cast<int64_t>(low);
+            int64_t full = static_cast<int64_t>(result128.low);
+            overflow = carry = (full != sign_extended);
             break;
         }
         case 64: {
-            // overflow 64 بیت پیچیده است، فرض می‌کنیم overflow=0
-            overflow = carry = false;
+            int64_t low = static_cast<int64_t>(result128.low);
+            overflow = carry = (result128.high != (low < 0 ? ~0ULL : 0ULL));
             break;
         }
         }
     }
+
     else {
         int64_t wide_result = 0;
         if (operand_count == 2) {
@@ -2873,6 +2877,7 @@ void emulate_shr(const ZydisDisassembledInstruction* instr) {
         g_regs.rflags.flags.ZF = (val == 0);
         g_regs.rflags.flags.SF = 0;
         g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(val));
+
         return;
     }
 
@@ -2896,7 +2901,7 @@ void emulate_shr(const ZydisDisassembledInstruction* instr) {
     g_regs.rflags.flags.ZF = (val == 0);
     g_regs.rflags.flags.SF = 0; 
     g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(val));
-
+    g_regs.rflags.flags.AF = 0;
 
     g_regs.rflags.flags.OF = (shift == 1) ? old_msb : 0;
 
@@ -3354,13 +3359,12 @@ void emulate_ror(const ZydisDisassembledInstruction* instr) {
     g_regs.rflags.flags.CF = (result >> (width - 1)) & 1;
 
     if (shift == 1) {
-
         bool msb = (result >> (width - 1)) & 1;
-        bool cf = g_regs.rflags.flags.CF;
-        g_regs.rflags.flags.OF = msb ^ cf;
+        bool next_msb = (result >> (width - 2)) & 1;
+        g_regs.rflags.flags.OF = msb ^ next_msb;
     }
     else {
-        g_regs.rflags.flags.OF = 0;  
+            !g_regs.rflags.flags.OF ;
     }
 
     LOG("CF : " << g_regs.rflags.flags.CF);
