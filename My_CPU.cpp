@@ -1769,6 +1769,26 @@ void emulate_stc(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] STC executed: CF set to 1");
 }
 
+void emulate_setb(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    uint8_t width = instr->info.operand_width;
+
+    uint64_t value = 0;
+    if (g_regs.rflags.flags.CF) {
+        value = 1;
+    }
+    else {
+        value = 0;
+    }
+
+    if (!write_operand_value(dst, 8, value)) {
+        LOG(L"[!] Failed to write SETB result");
+        return;
+    }
+
+    LOG(L"[+] SETB => " << value);
+}
+
 
 void emulate_bt(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -3180,6 +3200,26 @@ void emulate_vmovdqu(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] VMOVDQU executed");
 }
 
+void emulate_setnbe(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+
+
+    uint64_t value = 0;
+    if (!g_regs.rflags.flags.CF && !g_regs.rflags.flags.ZF) {
+        value = 1;
+    }
+    else {
+        value = 0;
+    }
+
+    if (!write_operand_value(dst, 8, value)) {
+        LOG(L"[!] Failed to write SETNBE result");
+        return;
+    }
+
+    LOG(L"[+] SETNBE => " << value);
+}
+
 
 void emulate_ror(const ZydisDisassembledInstruction* instr) {
     auto& dst = instr->operands[0];
@@ -4007,6 +4047,8 @@ int wmain(int argc, wchar_t* argv[]) {
         { ZYDIS_MNEMONIC_CMOVS, emulate_cmovs },
         { ZYDIS_MNEMONIC_CMOVNL, emulate_cmovnl },
         { ZYDIS_MNEMONIC_CMOVBE, emulate_cmovbe },
+        { ZYDIS_MNEMONIC_SETB, emulate_setb },
+        { ZYDIS_MNEMONIC_SETNBE, emulate_setnbe },
         
     };
 
