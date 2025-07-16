@@ -3411,7 +3411,7 @@ void start_emulation(uint64_t startAddress) {
                 uint64_t value = 0;
                 ReadMemory(g_regs.rsp.q, &value, 8);
                 SetSingleBreakpointAndEmulate(pi.hProcess, value, pi.hThread);
-                address = g_regs.rip;
+            address = g_regs.rip;
             }
 
         }
@@ -3511,7 +3511,6 @@ std::vector<uint32_t> GetTLSCallbackRVAs(const std::wstring& exePath) {
 }
 
 void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE hThread) {
-    // Set new breakpoint
     BYTE origByte;
     if (!SetBreakpoint(hProcess, newAddress, origByte)) {
         std::wcout << L"[!] Failed to set breakpoint at 0x" << std::hex << newAddress << std::endl;
@@ -3519,9 +3518,12 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
         return;
     }
 
+    // Update last breakpoint global vars if needed
     lastBreakpointAddr = newAddress;
     lastOrigByte = origByte;
     brakpiont_hit = 0;
+
+    // Set thread context to g_regs before continuing
     CONTEXT ctx = { 0 };
     ctx.ContextFlags = CONTEXT_FULL;
     if (GetThreadContext(hThread, &ctx)) {
@@ -3543,22 +3545,10 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
         ctx.R14 = g_regs.r14.q;
         ctx.R15 = g_regs.r15.q;
         ctx.EFlags = static_cast<DWORD>(g_regs.rflags.value);
-        memcpy(&ctx.Xmm0, g_regs.ymm[0].xmm, 16);
-        memcpy(&ctx.Xmm1, g_regs.ymm[1].xmm, 16);
-        memcpy(&ctx.Xmm2, g_regs.ymm[2].xmm, 16);
-        memcpy(&ctx.Xmm3, g_regs.ymm[3].xmm, 16);
-        memcpy(&ctx.Xmm4, g_regs.ymm[4].xmm, 16);
-        memcpy(&ctx.Xmm5, g_regs.ymm[5].xmm, 16);
-        memcpy(&ctx.Xmm6, g_regs.ymm[6].xmm, 16);
-        memcpy(&ctx.Xmm7, g_regs.ymm[7].xmm, 16);
-        memcpy(&ctx.Xmm8, g_regs.ymm[8].xmm, 16);
-        memcpy(&ctx.Xmm9, g_regs.ymm[9].xmm, 16);
-        memcpy(&ctx.Xmm10, g_regs.ymm[10].xmm, 16);
-        memcpy(&ctx.Xmm11, g_regs.ymm[11].xmm, 16);
-        memcpy(&ctx.Xmm12, g_regs.ymm[12].xmm, 16);
-        memcpy(&ctx.Xmm13, g_regs.ymm[13].xmm, 16);
-        memcpy(&ctx.Xmm14, g_regs.ymm[14].xmm, 16);
-        memcpy(&ctx.Xmm15, g_regs.ymm[15].xmm, 16);
+
+        for (int i = 0; i < 16; i++) {
+            memcpy((&ctx.Xmm0) + i, g_regs.ymm[i].xmm, 16);
+        }
 
         if (!SetThreadContext(hThread, &ctx)) {
             std::wcout << L"[!] Failed to set thread context before continuing" << std::endl;
@@ -3569,31 +3559,35 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
         std::wcout << L"[!] Failed to get thread context before continuing" << std::endl;
         return;
     }
+
+    // Continue execution to hit the breakpoint
     ContinueDebugEvent(pi.dwProcessId, GetThreadId(hThread), DBG_CONTINUE);
+
+    // Wait for breakpoint hit
     DEBUG_EVENT dbgEvent;
     while (true) {
         if (!WaitForDebugEvent(&dbgEvent, INFINITE)) break;
-        if (brakpiont_hit) {
-            break;
-        }
+
         DWORD continueStatus = DBG_CONTINUE;
 
         if (dbgEvent.dwDebugEventCode == EXCEPTION_DEBUG_EVENT) {
             auto& er = dbgEvent.u.Exception.ExceptionRecord;
+
             if (er.ExceptionCode == EXCEPTION_BREAKPOINT) {
                 uint64_t exAddr = reinterpret_cast<uint64_t>(er.ExceptionAddress);
+
                 if (exAddr == newAddress) {
                     // Remove breakpoint
                     RemoveBreakpoint(hProcess, newAddress, origByte);
 
-                    // Adjust RIP
+                    // Adjust RIP back
                     CONTEXT ctxHit = { 0 };
                     ctxHit.ContextFlags = CONTEXT_FULL;
                     if (GetThreadContext(hThread, &ctxHit)) {
                         ctxHit.Rip -= 1;
                         SetThreadContext(hThread, &ctxHit);
 
-                        // Update g_regs from ctx
+                        // Update g_regs
                         g_regs.rip = ctxHit.Rip;
                         g_regs.rsp.q = ctxHit.Rsp;
                         g_regs.rbp.q = ctxHit.Rbp;
@@ -3612,42 +3606,30 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
                         g_regs.r14.q = ctxHit.R14;
                         g_regs.r15.q = ctxHit.R15;
                         g_regs.rflags.value = ctxHit.EFlags;
-                        memcpy(g_regs.ymm[0].xmm, &ctx.Xmm0, 16);
-                        memcpy(g_regs.ymm[1].xmm, &ctx.Xmm1, 16);
-                        memcpy(g_regs.ymm[2].xmm, &ctx.Xmm2, 16);
-                        memcpy(g_regs.ymm[3].xmm, &ctx.Xmm3, 16);
-                        memcpy(g_regs.ymm[4].xmm, &ctx.Xmm4, 16);
-                        memcpy(g_regs.ymm[5].xmm, &ctx.Xmm5, 16);
-                        memcpy(g_regs.ymm[6].xmm, &ctx.Xmm6, 16);
-                        memcpy(g_regs.ymm[7].xmm, &ctx.Xmm7, 16);
-                        memcpy(g_regs.ymm[8].xmm, &ctx.Xmm8, 16);
-                        memcpy(g_regs.ymm[9].xmm, &ctx.Xmm9, 16);
-                        memcpy(g_regs.ymm[10].xmm, &ctx.Xmm10, 16);
-                        memcpy(g_regs.ymm[11].xmm, &ctx.Xmm11, 16);
-                        memcpy(g_regs.ymm[12].xmm, &ctx.Xmm12, 16);
-                        memcpy(g_regs.ymm[13].xmm, &ctx.Xmm13, 16);
-                        memcpy(g_regs.ymm[14].xmm, &ctx.Xmm14, 16);
-                        memcpy(g_regs.ymm[15].xmm, &ctx.Xmm15, 16);
+
+                        for (int i = 0; i < 16; i++) {
+                            memcpy(g_regs.ymm[i].xmm, (&ctxHit.Xmm0) + i, 16);
+                        }
+
                         brakpiont_hit = 1;
-
-
                     }
 
-                    // Emulate from breakpoint address
-                    break;
-
+                    break; // Break out of loop after emulation
                 }
             }
+            else {
+                uint64_t exAddr = reinterpret_cast<uint64_t>(er.ExceptionAddress);
+                LOG("[*] EXCEPTION : " << er.ExceptionCode << " at 0x" << std::hex << exAddr);
+            }
         }
-         else{
-            LOG("[+] EventCode : "<< dbgEvent.dwDebugEventCode);
-            exit(0);
+        else {
+            LOG("[+] EventCode : " << dbgEvent.dwDebugEventCode);
         }
 
+        ContinueDebugEvent(dbgEvent.dwProcessId, dbgEvent.dwThreadId, continueStatus);
     }
-
-
 }
+
 
 #if DB_ENABLED
 void CompareRFlags(const CONTEXT& ctx) {
@@ -4100,23 +4082,9 @@ int wmain(int argc, wchar_t* argv[]) {
                     g_regs.rip = ctx.Rip;
                     g_regs.rflags.value = ctx.EFlags;
 
-
-                    memcpy(g_regs.ymm[0].xmm, &ctx.Xmm0, 16);
-                    memcpy(g_regs.ymm[1].xmm, &ctx.Xmm1, 16);
-                    memcpy(g_regs.ymm[2].xmm, &ctx.Xmm2, 16);
-                    memcpy(g_regs.ymm[3].xmm, &ctx.Xmm3, 16);
-                    memcpy(g_regs.ymm[4].xmm, &ctx.Xmm4, 16);
-                    memcpy(g_regs.ymm[5].xmm, &ctx.Xmm5, 16);
-                    memcpy(g_regs.ymm[6].xmm, &ctx.Xmm6, 16);
-                    memcpy(g_regs.ymm[7].xmm, &ctx.Xmm7, 16);
-                    memcpy(g_regs.ymm[8].xmm, &ctx.Xmm8, 16);
-                    memcpy(g_regs.ymm[9].xmm, &ctx.Xmm9, 16);
-                    memcpy(g_regs.ymm[10].xmm, &ctx.Xmm10, 16);
-                    memcpy(g_regs.ymm[11].xmm, &ctx.Xmm11, 16);
-                    memcpy(g_regs.ymm[12].xmm, &ctx.Xmm12, 16);
-                    memcpy(g_regs.ymm[13].xmm, &ctx.Xmm13, 16);
-                    memcpy(g_regs.ymm[14].xmm, &ctx.Xmm14, 16);
-                    memcpy(g_regs.ymm[15].xmm, &ctx.Xmm15, 16);
+                    for (int i = 0; i < 16; i++) {
+                        memcpy(g_regs.ymm[i].xmm, (&ctx.Xmm0) + i, 16);
+                    }
 
                     goto
                     cleanup;
