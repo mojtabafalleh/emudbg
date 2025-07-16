@@ -28,7 +28,7 @@ bool brakpiont_hit;
 #endif
 
 //test with real cpu 
-#define DB_ENABLED 0
+#define DB_ENABLED 1
 #if DB_ENABLED
 bool is_cpuid;
 void SingleStepAndCompare(HANDLE hProcess, HANDLE hThread);
@@ -941,7 +941,7 @@ void emulate_mul(const ZydisDisassembledInstruction* instr) {
 
 void emulate_imul(const ZydisDisassembledInstruction* instr) {
     const auto& ops = instr->operands;
-    int operand_count = instr->info.operand_count - 1;
+    int operand_count = instr->info.operand_count_visible;  
     int width = instr->info.operand_width;
 
     int64_t val1 = 0, val2 = 0, imm = 0;
@@ -966,7 +966,7 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
             break;
         case 16:
             g_regs.rax.w = static_cast<uint16_t>(result128.low);
-            g_regs.rdx.w = static_cast<uint16_t>(result128.low >> 16);
+            g_regs.rdx.w = static_cast<uint16_t>(result128.high);
             break;
         case 32:
             g_regs.rax.d = static_cast<uint32_t>(result128.low);
@@ -1005,13 +1005,46 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
     bool carry = false;
 
     if (operand_count == 1) {
-        overflow = carry = (width == 64) ? (result128.high != 0) :
-            (width == 32) ? (result128.high != 0) :
-            (width == 16) ? ((result128.low >> 16) != 0) :
-            (width == 8) ? ((result128.low >> 8) != 0) : false;
+        // برای overflow/carry باید بررسی sign extend قسمت high روی نتیجه 128 بیت انجام شود
+        switch (width) {
+        case 8: {
+            int16_t full_result = static_cast<int16_t>(result128.low);
+            int8_t low_part = static_cast<int8_t>(result128.low & 0xFF);
+            overflow = carry = (full_result != low_part);
+            break;
+        }
+        case 16: {
+            int32_t full_result = static_cast<int32_t>(result128.low);
+            int16_t low_part = static_cast<int16_t>(result128.low & 0xFFFF);
+            overflow = carry = (full_result != low_part);
+            break;
+        }
+        case 32: {
+            int64_t full_result = static_cast<int64_t>(result128.low);
+            int32_t low_part = static_cast<int32_t>(result128.low & 0xFFFFFFFF);
+            overflow = carry = (full_result != low_part);
+            break;
+        }
+        case 64: {
+            // overflow 64 بیت پیچیده است، فرض می‌کنیم overflow=0
+            overflow = carry = false;
+            break;
+        }
+        }
     }
     else {
-        int64_t wide_result = (int64_t)val1 * (int64_t)val2;
+        int64_t wide_result = 0;
+        if (operand_count == 2) {
+            val1 = read_signed_operand(ops[0], width);
+            val2 = read_signed_operand(ops[1], width);
+            wide_result = val1 * val2;
+        }
+        else if (operand_count == 3) {
+            val1 = read_signed_operand(ops[1], width);
+            imm = read_signed_operand(ops[2], width);
+            wide_result = val1 * imm;
+        }
+
         switch (width) {
         case 8:
             overflow = carry = (wide_result != (int64_t)(int8_t)wide_result);
@@ -1028,12 +1061,15 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
         }
     }
 
+    uint64_t check_val = (operand_count == 1) ? (result128.low & ((1ULL << (width * 8)) - 1)) : (static_cast<uint64_t>(result64) & ((1ULL << (width * 8)) - 1));
     g_regs.rflags.flags.ZF = (operand_count == 1) ? (result128.low == 0) : 0;
-    g_regs.rflags.flags.SF = ((operand_count == 1 ? result128.low : result64) & (1ULL << (width * 8 - 1))) != 0;
+
+    g_regs.rflags.flags.SF = (check_val >> ((width * 8) - 1)) & 1;
     g_regs.rflags.flags.OF = overflow;
-    g_regs.rflags.flags.CF = overflow;
+    g_regs.rflags.flags.CF = carry;
     g_regs.rflags.flags.AF = 0;
     g_regs.rflags.flags.PF = !parity((operand_count == 1 ? result128.low : result64) & 0xFF);
+
 }
 
 void emulate_movdqu(const ZydisDisassembledInstruction* instr) {
@@ -1999,6 +2035,31 @@ void emulate_xgetbv(const ZydisDisassembledInstruction*) {
         << L", RAX=0x" << g_regs.rax.q << L", RDX=0x" << g_regs.rdx.q);
 }
 
+void emulate_cmovnb(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+
+    if (g_regs.rflags.flags.CF) {
+        LOG(L"[+] CMOVNB skipped (CF=1)");
+        return;
+    }
+
+    uint64_t value = 0;
+    if (!read_operand_value(src, instr->info.operand_width, value)) {
+        LOG(L"[!] Failed to read source operand for CMOVNB");
+        return;
+    }
+
+    if (!write_operand_value(dst, instr->info.operand_width, value)) {
+        LOG(L"[!] Failed to write destination operand for CMOVNB");
+        return;
+    }
+
+    LOG(L"[+] CMOVNB executed: moved 0x" << std::hex << value << L" to "
+        << ZydisRegisterGetString(dst.reg.value));
+}
+
+
 void emulate_cmovz(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
@@ -2895,6 +2956,43 @@ void emulate_jnbe(const ZydisDisassembledInstruction* instr) {
     }
 }
 
+void emulate_movsd(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    uint32_t width = 64; 
+
+    if (dst.type != ZYDIS_OPERAND_TYPE_REGISTER || src.type != ZYDIS_OPERAND_TYPE_MEMORY) {
+        LOG(L"[!] MOVSD expects dst=XMM register and src=memory");
+        return;
+    }
+
+
+    uint64_t mem_val = 0;
+    if (!read_operand_value(src, width, mem_val)) {
+        LOG(L"[!] Failed to read 64-bit value from memory in MOVSD");
+        return;
+    }
+
+
+    __m128 old_val;
+    if (!read_operand_value<__m128>(dst, 128, old_val)) {
+        LOG(L"[!] Failed to read XMM register value");
+        return;
+    }
+
+
+    uint64_t* p = reinterpret_cast<uint64_t*>(&old_val);
+    p[0] = mem_val; 
+
+    if (!write_operand_value<__m128>(dst, 128, old_val)) {
+        LOG(L"[!] Failed to write new value to XMM register");
+        return;
+    }
+
+    LOG(L"[+] MOVSD xmm, qword ptr [mem] executed");
+}
+
+
 
 void emulate_sar(const ZydisDisassembledInstruction* instr) {
     auto& dst = instr->operands[0];
@@ -3241,6 +3339,7 @@ void emulate_ror(const ZydisDisassembledInstruction* instr) {
     shift %= width;  // rotation count wraps around
 
     if (shift == 0) {
+
         return;
     }
 
@@ -3252,25 +3351,20 @@ void emulate_ror(const ZydisDisassembledInstruction* instr) {
         return;
     }
 
-    // CF = bit (width - shift) of original value (which ends up at MSB after rotate)
     g_regs.rflags.flags.CF = (result >> (width - 1)) & 1;
 
     if (shift == 1) {
+
         bool msb = (result >> (width - 1)) & 1;
-        bool lsb = result & 1;
-        g_regs.rflags.flags.OF = msb ^ lsb;
+        bool cf = g_regs.rflags.flags.CF;
+        g_regs.rflags.flags.OF = msb ^ cf;
     }
     else {
-        bool msb = (result >> (width - 1)) & 1;
-        bool lsb = result & 1;
-        LOG("msb : " << msb);
-        LOG("lsb : " << lsb);
-        g_regs.rflags.flags.OF = 0;
-
+        g_regs.rflags.flags.OF = 0;  
     }
+
     LOG("CF : " << g_regs.rflags.flags.CF);
     LOG("OF : " << g_regs.rflags.flags.OF);
-
     LOG(L"[+] ROR => 0x" << std::hex << result);
 }
 
@@ -3290,6 +3384,31 @@ void emulate_jnl(const ZydisDisassembledInstruction* instr) {
         LOG(L"[!] Unsupported operand type for JNL");
         g_regs.rip += instr->info.length;
     }
+}
+
+void emulate_cmovl(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+
+
+    if (g_regs.rflags.flags.SF == g_regs.rflags.flags.OF) {
+        LOG(L"[+] CMOVL skipped (SF == OF)");
+        return;
+    }
+
+    uint64_t value = 0;
+    if (!read_operand_value(src, instr->info.operand_width, value)) {
+        LOG(L"[!] Failed to read source operand for CMOVL");
+        return;
+    }
+
+    if (!write_operand_value(dst, instr->info.operand_width, value)) {
+        LOG(L"[!] Failed to write destination operand for CMOVL");
+        return;
+    }
+
+    LOG(L"[+] CMOVL executed: moved 0x" << std::hex << value << L" to "
+        << ZydisRegisterGetString(dst.reg.value));
 }
 
 
@@ -4049,6 +4168,9 @@ int wmain(int argc, wchar_t* argv[]) {
         { ZYDIS_MNEMONIC_CMOVBE, emulate_cmovbe },
         { ZYDIS_MNEMONIC_SETB, emulate_setb },
         { ZYDIS_MNEMONIC_SETNBE, emulate_setnbe },
+        { ZYDIS_MNEMONIC_CMOVNB, emulate_cmovnb },
+        { ZYDIS_MNEMONIC_CMOVL, emulate_cmovl },
+        { ZYDIS_MNEMONIC_MOVSD, emulate_movsd },
         
     };
 
