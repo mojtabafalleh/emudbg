@@ -27,7 +27,8 @@ bool brakpiont_hit;
 #define LOG(x)
 #endif
 
-#define DB_ENABLED 1
+//test with real cpu 
+#define DB_ENABLED 0
 #if DB_ENABLED
 bool is_cpuid;
 void SingleStepAndCompare(HANDLE hProcess, HANDLE hThread);
@@ -917,7 +918,23 @@ void emulate_mul(const ZydisDisassembledInstruction* instr) {
 
     g_regs.rflags.flags.CF = upper_nonzero;
     g_regs.rflags.flags.OF = upper_nonzero;
-
+    g_regs.rflags.flags.PF = (parity(result.high) ==  parity(result.low));
+    g_regs.rflags.flags.ZF = 0;
+    g_regs.rflags.flags.AF = 0;
+    switch (width) {
+    case 8:
+        g_regs.rflags.flags.SF = (g_regs.rax.l & 0x80) != 0;
+        break;
+    case 16:
+        g_regs.rflags.flags.SF = (g_regs.rax.w & 0x8000) != 0;
+        break;
+    case 32:
+        g_regs.rflags.flags.SF = (g_regs.rax.d & 0x80000000) != 0;
+        break;
+    case 64:
+        g_regs.rflags.flags.SF = (g_regs.rax.q & 0x8000000000000000) != 0;
+        break;
+    }
     // ZF, SF, PF are undefined after MUL, no update needed
 }
 
@@ -3199,11 +3216,20 @@ void emulate_ror(const ZydisDisassembledInstruction* instr) {
     g_regs.rflags.flags.CF = (result >> (width - 1)) & 1;
 
     if (shift == 1) {
-        // OF = MSB ^ next bit
         bool msb = (result >> (width - 1)) & 1;
-        bool msb1 = (result >> (width - 2)) & 1;
-        g_regs.rflags.flags.OF = msb ^ msb1;
+        bool lsb = result & 1;
+        g_regs.rflags.flags.OF = msb ^ lsb;
     }
+    else {
+        bool msb = (result >> (width - 1)) & 1;
+        bool lsb = result & 1;
+        LOG("msb : " << msb);
+        LOG("lsb : " << lsb);
+        g_regs.rflags.flags.OF = 0;
+
+    }
+    LOG("CF : " << g_regs.rflags.flags.CF);
+    LOG("OF : " << g_regs.rflags.flags.OF);
 
     LOG(L"[+] ROR => 0x" << std::hex << result);
 }
