@@ -9,7 +9,7 @@ if(MSVC)
 endif()
 
 # Create the main executable
-add_executable(My_CPU "My_CPU.cpp" "asm_function.asm")
+add_executable(My_CPU "emudbg.cpp" "asm_function.asm")
 
 # Optional: Use C++20 if available
 if (CMAKE_VERSION VERSION_GREATER 3.12)
