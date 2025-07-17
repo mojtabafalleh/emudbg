@@ -4205,6 +4205,11 @@ void SetSingleBreakpointAndEmulate(HANDLE hProcess, uint64_t newAddress, HANDLE 
                 exit(0);
             }
         }
+        else if (dbgEvent.dwDebugEventCode == CREATE_THREAD_DEBUG_EVENT) {
+            LOG( L"[+] Thread created. Thread ID: " << dbgEvent.dwThreadId
+                << L", Entry point: 0x" << std::hex
+                << (uint64_t)dbgEvent.u.CreateThread.lpStartAddress);
+        }
         else {
             LOG("[+] EventCode : " << dbgEvent.dwDebugEventCode);
 
