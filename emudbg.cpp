@@ -22,7 +22,7 @@ BYTE lastOrigByte = 0;
 PROCESS_INFORMATION pi;
 bool has_rep;
 bool brakpiont_hit;
-#define LOG_ENABLED 0
+#define LOG_ENABLED 1
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
@@ -1437,6 +1437,34 @@ void emulate_movsx(const ZydisDisassembledInstruction* instr) {
         << ZydisRegisterGetString(dst.reg.value));
 }
 
+void emulate_cmovns(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    int width = instr->info.operand_width;
+
+    if (dst.type != ZYDIS_OPERAND_TYPE_REGISTER) {
+        LOG(L"[!] CMOVNS destination must be a register");
+        return;
+    }
+
+
+    if (g_regs.rflags.flags.SF == 0) {
+        uint64_t val = 0;
+        if (!read_operand_value(src, width, val)) {
+            LOG(L"[!] Failed to read source operand in cmovns");
+            return;
+        }
+        if (!write_operand_value(dst, width, val)) {
+            LOG(L"[!] Failed to write destination operand in cmovns");
+            return;
+        }
+        LOG(L"[+] CMOVNS: moved (SF=0)");
+    }
+    else {
+        LOG(L"[+] CMOVNS: condition not met (no move, SF=1)");
+    }
+}
+
 
 void emulate_movaps(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
@@ -2044,6 +2072,68 @@ void emulate_rcr(const ZydisDisassembledInstruction* instr) {
     LOG(L"[+] RCR => 0x" << std::hex << val);
 }
 
+void emulate_rcl(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    uint8_t width = instr->info.operand_width ; 
+
+    uint64_t val = 0;
+    if (!read_operand_value(dst, instr->info.operand_width, val)) {
+        LOG(L"[!] Failed to read RCL destination operand");
+        return;
+    }
+
+    uint8_t count = 0;
+    if (src.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        count = static_cast<uint8_t>(src.imm.value.u);
+    }
+    else if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        count = get_register_value<uint8_t>(src.reg.value);
+    }
+    else {
+        LOG(L"[!] Unsupported RCL count operand type");
+        return;
+    }
+
+    count &= 0x1F;  
+
+    if (count == 0) {
+        LOG(L"[+] RCL => no operation");
+        return;
+    }
+
+    bool old_CF = g_regs.rflags.flags.CF;
+
+    for (int i = 0; i < count; ++i) {
+        bool new_CF = (val >> (width - 1)) & 1;  
+        val <<= 1;
+        if (old_CF)
+            val |= 1;
+        else
+            val &= ~1ULL;
+        old_CF = new_CF;
+    }
+
+    g_regs.rflags.flags.CF = old_CF;
+
+    if (!write_operand_value(dst, instr->info.operand_width, val)) {
+        LOG(L"[!] Failed to write RCL result");
+        return;
+    }
+
+    bool msb = (val >> (width - 1)) & 1;
+    bool msb_minus_1 = (val >> (width - 2)) & 1;
+
+    g_regs.rflags.flags.SF = msb;
+    if (count == 1) {
+        g_regs.rflags.flags.OF = msb ^ old_CF; 
+    }
+
+
+    LOG(L"[+] RCL => 0x" << std::hex << val);
+}
+
+
 void emulate_clc(const ZydisDisassembledInstruction* instr) {
     g_regs.rflags.flags.CF = 0;
     LOG(L"[+] CLC => CF=0");
@@ -2374,6 +2464,62 @@ void emulate_punpcklqdq(const ZydisDisassembledInstruction* instr) {
 
     LOG(L"[+] PUNPCKLQDQ xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
         << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0));
+}
+
+void emulate_shrd(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    const auto& count_op = instr->operands[2];
+    uint8_t width = instr->info.operand_width ; 
+
+    uint64_t dst_val = 0, src_val = 0;
+    if (!read_operand_value(dst, instr->info.operand_width, dst_val)) {
+        LOG(L"[!] Failed to read destination operand");
+        return;
+    }
+    if (!read_operand_value(src, instr->info.operand_width, src_val)) {
+        LOG(L"[!] Failed to read source operand");
+        return;
+    }
+
+    uint8_t count = 0;
+    if (count_op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        count = static_cast<uint8_t>(count_op.imm.value.u);
+    }
+    else if (count_op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        count = get_register_value<uint8_t>(count_op.reg.value);
+    }
+    else {
+        LOG(L"[!] Unsupported SHRD count operand type");
+        return;
+    }
+
+    if (count == 0) {
+        LOG(L"[+] SHRD => no operation");
+        return;
+    }
+
+    count &= 0x3F;  
+
+
+    uint64_t result = (dst_val >> count) | (src_val << (width - count));
+
+    bool msb_before = (dst_val >> (width - 1)) & 1;
+    bool msb_after = (result >> (width - 1)) & 1;
+
+    g_regs.rflags.flags.CF = (dst_val >> (count - 1)) & 1;  
+    g_regs.rflags.flags.OF = msb_before ^ msb_after;
+
+    g_regs.rflags.flags.SF = msb_after;
+    g_regs.rflags.flags.ZF = (result == 0);
+    g_regs.rflags.flags.PF = parity(static_cast<uint8_t>(result & 0xFF));
+
+    if (!write_operand_value(dst, instr->info.operand_width, result)) {
+        LOG(L"[!] Failed to write SHRD result");
+        return;
+    }
+
+    LOG(L"[+] SHRD => 0x" << std::hex << result);
 }
 
 
@@ -2710,6 +2856,61 @@ void emulate_jnle(const ZydisDisassembledInstruction* instr) {
         LOG(L"[!] Unsupported operand type for JNLE");
         g_regs.rip += instr->info.length;
     }
+}
+
+void emulate_shld(const ZydisDisassembledInstruction* instr) {
+    const auto& dst = instr->operands[0];
+    const auto& src = instr->operands[1];
+    const auto& count_op = instr->operands[2];
+    uint8_t width = instr->info.operand_width ; 
+
+    uint64_t dst_val = 0, src_val = 0;
+    if (!read_operand_value(dst, instr->info.operand_width, dst_val)) {
+        LOG(L"[!] Failed to read destination operand");
+        return;
+    }
+    if (!read_operand_value(src, instr->info.operand_width, src_val)) {
+        LOG(L"[!] Failed to read source operand");
+        return;
+    }
+
+    uint8_t count = 0;
+    if (count_op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+        count = static_cast<uint8_t>(count_op.imm.value.u);
+    }
+    else if (count_op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        count = get_register_value<uint8_t>(count_op.reg.value);
+    }
+    else {
+        LOG(L"[!] Unsupported SHLD count operand type");
+        return;
+    }
+
+    if (count == 0) {
+        LOG(L"[+] SHLD => no operation");
+        return;
+    }
+
+    count &= 0x3F;  
+
+    uint64_t result = (dst_val << count) | (src_val >> (width - count));
+
+    bool msb_before = (dst_val >> (width - 1)) & 1;
+    bool msb_after = (result >> (width - 1)) & 1;
+
+    g_regs.rflags.flags.CF = (dst_val >> (width - count)) & 1;  
+    g_regs.rflags.flags.OF = msb_before ^ msb_after;
+
+    g_regs.rflags.flags.SF = msb_after;
+    g_regs.rflags.flags.ZF = (result == 0);
+    g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result & 0xFF));
+
+    if (!write_operand_value(dst, instr->info.operand_width, result)) {
+        LOG(L"[!] Failed to write SHLD result");
+        return;
+    }
+
+    LOG(L"[+] SHLD => 0x" << std::hex << result);
 }
 
 
@@ -4400,7 +4601,11 @@ int wmain(int argc, wchar_t* argv[]) {
         { ZYDIS_MNEMONIC_MOVSD, emulate_movsd },
         { ZYDIS_MNEMONIC_PSRLDQ, emulate_psrldq },
         { ZYDIS_MNEMONIC_MOVD, emulate_movd },
-
+        { ZYDIS_MNEMONIC_RCL, emulate_rcl },
+        { ZYDIS_MNEMONIC_SHLD, emulate_shld },
+        { ZYDIS_MNEMONIC_SHRD, emulate_shrd },
+        { ZYDIS_MNEMONIC_CMOVNS, emulate_cmovns },
+        
     };
 
     STARTUPINFOW si = { sizeof(si) };
