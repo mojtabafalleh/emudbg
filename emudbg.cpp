@@ -3,6 +3,7 @@
 #include <fstream>
 #include <vector>
 #include <unordered_map>
+#include <map>
 #include <string>
 #include <filesystem>
 #include <cstdint>
@@ -124,6 +125,35 @@ struct RegState {
     uint64_t gs_base;
     uint64_t fs_base;
 } g_regs;
+//-------------- emulation struct --------------
+struct BreakpointData {
+    uint64_t address;
+    BYTE origByte;
+};
+
+struct RangeAddress {
+    uint64_t startAddr;
+    uint64_t endAddr;
+
+    bool contains(uint64_t addr) const {
+        return addr >= startAddr && addr <= endAddr;
+    }
+};
+
+struct EmulationThreadData {
+    HANDLE hThread;
+    DWORD threadId;
+    bool isActive;
+    std::vector<BreakpointData> breakpoints;
+};
+
+struct EmulationProcessData {
+    HANDLE hProcess;
+    DWORD processId;
+    std::map<DWORD, EmulationThreadData> threads;
+    std::vector<RangeAddress> emulationRanges;
+};
+
 //----------------------- MATH ------------------------------
 
 struct uint128_t {
