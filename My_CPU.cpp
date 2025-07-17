@@ -16,6 +16,8 @@ IMAGE_OPTIONAL_HEADER64 optionalHeader;
 ZydisDecodedInstruction instr;
 uint64_t startaddr, endaddr;
 uint64_t lastBreakpointAddr = 0;
+
+
 BYTE lastOrigByte = 0;
 PROCESS_INFORMATION pi;
 bool has_rep;
@@ -28,8 +30,16 @@ bool brakpiont_hit;
 #endif
 
 //test with real cpu 
-#define DB_ENABLED 1
+#define DB_ENABLED 0
 #if DB_ENABLED
+struct memory_mange
+{
+    uint64_t address;
+    SIZE_T size;
+    char  buffer[1024];
+    bool is_write;
+};
+memory_mange my_mange;
 bool is_cpuid;
 void SingleStepAndCompare(HANDLE hProcess, HANDLE hThread);
 void CompareRegistersWithEmulation(CONTEXT& ctx);
@@ -158,15 +168,46 @@ bool ReadMemory(uint64_t address, void* buffer, SIZE_T size) {
 bool WriteMemory(uint64_t address, const void* buffer, SIZE_T size) {
     SIZE_T bytesWritten;
 
-
 #if DB_ENABLED
-    return 1; 
-#else
-    return WriteProcessMemory(hProcess, (LPVOID)address, buffer, size, &bytesWritten) && bytesWritten == size;
-
+    my_mange.address = address;
+    my_mange.size = size;
+    my_mange.is_write = 1;
+    if (size <= sizeof(my_mange.buffer)) {
+        memcpy(my_mange.buffer, buffer, size);
+    }
+    else {
+        LOG(L"WriteMemory LOG buffer too big to copy");
+    }
+    return true;
 #endif
- 
+    bool result = WriteProcessMemory(hProcess, (LPVOID)address, buffer, size, &bytesWritten) && bytesWritten == size;
+#if LOG_ENABLED
+    if (result) {
+        // Read back the written data
+        char readBuffer[1024] = { 0 }; // adjust size if needed
+        if (size <= sizeof(readBuffer)) {
+            if (ReadMemory(address, readBuffer, size)) {
+                // LOG the read back value in hex
+                LOG("WriteMemory LOG at 0x" << std::hex<< address);
+                    for (SIZE_T i = 0; i < size; i++)
+                        printf("%02X ", (unsigned char)readBuffer[i]);
+                printf("\n");
+
+            }
+            else {
+                LOG("WriteMemory LOG failed to read back from 0x"<< std::hex<< address);
+
+            }
+        }
+        else {
+            LOG("WriteMemory LOG skipped: size too big ( "<< std::hex <<size << " bytes)");
+        }
+    }
+#endif
+    return result;
 }
+
+
 
 template<typename T>
 bool AccessMemory(bool write, uint64_t address, T* inout) {
@@ -2964,39 +3005,80 @@ void emulate_jnbe(const ZydisDisassembledInstruction* instr) {
 void emulate_movsd(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
-    uint32_t width = 64; 
+    uint32_t width = 64;
 
-    if (dst.type != ZYDIS_OPERAND_TYPE_REGISTER || src.type != ZYDIS_OPERAND_TYPE_MEMORY) {
-        LOG(L"[!] MOVSD expects dst=XMM register and src=memory");
-        return;
+    if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        // movsd xmm, qword ptr [mem]
+        uint64_t mem_val = 0;
+        if (!read_operand_value(src, width, mem_val)) {
+            LOG(L"[!] Failed to read 64-bit value from memory in MOVSD");
+            return;
+        }
+
+        __m128 old_val;
+        if (!read_operand_value<__m128>(dst, 128, old_val)) {
+            LOG(L"[!] Failed to read XMM register value");
+            return;
+        }
+
+        uint64_t* p = reinterpret_cast<uint64_t*>(&old_val);
+        p[0] = mem_val;
+
+        if (!write_operand_value<__m128>(dst, 128, old_val)) {
+            LOG(L"[!] Failed to write new value to XMM register");
+            return;
+        }
+
+        LOG(L"[+] MOVSD xmm, qword ptr [mem] executed");
     }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        // movsd qword ptr [mem], xmm
+        __m128 xmm_val;
+        if (!read_operand_value<__m128>(src, 128, xmm_val)) {
+            LOG(L"[!] Failed to read XMM register value");
+            return;
+        }
 
+        uint64_t* p = reinterpret_cast<uint64_t*>(&xmm_val);
+        uint64_t val64 = p[0];
 
-    uint64_t mem_val = 0;
-    if (!read_operand_value(src, width, mem_val)) {
-        LOG(L"[!] Failed to read 64-bit value from memory in MOVSD");
-        return;
+        if (!write_operand_value(dst, width, val64)) {
+            LOG(L"[!] Failed to write 64-bit value to memory in MOVSD");
+            return;
+        }
+
+        LOG(L"[+] MOVSD qword ptr [mem], xmm executed");
     }
+    else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        // movsd xmm1, xmm2
+        __m128 src_val;
+        if (!read_operand_value<__m128>(src, 128, src_val)) {
+            LOG(L"[!] Failed to read source XMM register value");
+            return;
+        }
 
+        __m128 dst_val;
+        if (!read_operand_value<__m128>(dst, 128, dst_val)) {
+            LOG(L"[!] Failed to read destination XMM register value");
+            return;
+        }
 
-    __m128 old_val;
-    if (!read_operand_value<__m128>(dst, 128, old_val)) {
-        LOG(L"[!] Failed to read XMM register value");
-        return;
+        // move lower 64 bits
+        uint64_t* p_dst = reinterpret_cast<uint64_t*>(&dst_val);
+        uint64_t* p_src = reinterpret_cast<uint64_t*>(&src_val);
+        p_dst[0] = p_src[0];
+
+        if (!write_operand_value<__m128>(dst, 128, dst_val)) {
+            LOG(L"[!] Failed to write destination XMM register value");
+            return;
+        }
+
+        LOG(L"[+] MOVSD xmm, xmm executed");
     }
-
-
-    uint64_t* p = reinterpret_cast<uint64_t*>(&old_val);
-    p[0] = mem_val; 
-
-    if (!write_operand_value<__m128>(dst, 128, old_val)) {
-        LOG(L"[!] Failed to write new value to XMM register");
-        return;
+    else {
+        LOG(L"[!] Unsupported MOVSD operand combination");
     }
-
-    LOG(L"[+] MOVSD xmm, qword ptr [mem] executed");
 }
-
 
 
 void emulate_sar(const ZydisDisassembledInstruction* instr) {
@@ -3501,6 +3583,7 @@ void start_emulation(uint64_t startAddress) {
         if (disasm.Disassemble(address, buffer, bytesRead)) {
 #if DB_ENABLED
             is_cpuid = 0;
+            my_mange.is_write = 0;
 #endif
             const ZydisDisassembledInstruction* op = disasm.GetInstr();
             instr = op->info;
@@ -4031,6 +4114,36 @@ void SingleStepAndCompare(HANDLE hProcess, HANDLE hThread) {
                     }
                     else {
                     CompareRegistersWithEmulation(ctxAfter);
+
+                    if (my_mange.is_write) {
+                        char readBuffer[1024] = { 0 }; // adjust size if needed
+                        if (my_mange.size <= sizeof(readBuffer)) {
+                            if (ReadMemory(my_mange.address, readBuffer, my_mange.size)) {
+                                if (memcmp(readBuffer, my_mange.buffer, my_mange.size) != 0) {
+
+                                    // log readBuffer
+                                    LOG(L"readBuffer:");
+                                    for (size_t i = 0; i < my_mange.size; ++i) {
+                                        LOG(std::hex << std::setw(2) << std::setfill(L'0') << (static_cast<unsigned char>(readBuffer[i])) << L" ");
+                                    }
+                                    std::wcout << std::endl;
+
+                                    // log my_mange.buffer
+                                    LOG(L"my_mange.buffer:");
+                                    const char* buf = static_cast<const char*>(my_mange.buffer);
+                                    for (size_t i = 0; i < my_mange.size; ++i) {
+                                        LOG( std::hex << std::setw(2) << std::setfill(L'0') << (static_cast<unsigned char>(buf[i])) << L" ");
+                                    }
+                                    std::wcout << std::endl;
+                                    DumpRegisters();
+                                    exit(0);
+                                }
+                            }
+                            else {
+                                LOG(L"WriteMemory LOG failed to read back from 0x" << std::hex << my_mange.address);
+                            }
+                        }
+                    }
                     }
 
                 }
