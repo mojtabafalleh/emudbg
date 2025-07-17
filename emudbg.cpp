@@ -22,7 +22,7 @@ BYTE lastOrigByte = 0;
 PROCESS_INFORMATION pi;
 bool has_rep;
 bool brakpiont_hit;
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
@@ -1046,7 +1046,7 @@ void emulate_imul(const ZydisDisassembledInstruction* instr) {
     bool carry = false;
 
     if (operand_count == 1) {
-        // برای overflow/carry باید بررسی sign extend قسمت high روی نتیجه 128 بیت انجام شود
+  
         switch (width) {
         case 8: {
             int8_t low = static_cast<int8_t>(result128.low & 0xFF);
@@ -2675,6 +2675,7 @@ void emulate_cmovbe(const ZydisDisassembledInstruction* instr) {
 }
 
 
+
 void emulate_cmovb(const ZydisDisassembledInstruction* instr) {
     const auto& dst = instr->operands[0];
     const auto& src = instr->operands[1];
@@ -3049,7 +3050,7 @@ void emulate_shl(const ZydisDisassembledInstruction* instr) {
     uint64_t old_val = val;
     uint64_t result = val << shift;
 
-    // محدود کردن به عرض بیت
+
     if (width < 64) {
         result &= (1ULL << width) - 1;
     }
@@ -3168,6 +3169,32 @@ void emulate_stosb(const ZydisDisassembledInstruction* instr) {
 
     LOG(L"[+] STOSB: Wrote 0x" << std::hex << static_cast<int>(al_val)
         << L" to [RDI] = 0x" << dest
+        << L", new RDI = 0x" << g_regs.rdi.q);
+}
+
+void emulate_movsb(const ZydisDisassembledInstruction* instr) {
+    uint64_t src = g_regs.rsi.q;
+    uint64_t dest = g_regs.rdi.q;
+    uint8_t byte_val = 0;
+    int delta = (g_regs.rflags.flags.DF) ? -1 : 1;
+
+    if (!ReadMemory(src, &byte_val, sizeof(uint8_t))) {
+        LOG(L"[!] MOVSB: Failed to read memory at 0x" << std::hex << src);
+        return;
+    }
+
+    if (!WriteMemory(dest, &byte_val, sizeof(uint8_t))) {
+        LOG(L"[!] MOVSB: Failed to write memory at 0x" << std::hex << dest);
+        return;
+    }
+
+    g_regs.rsi.q += delta;
+    g_regs.rdi.q += delta;
+
+    LOG(L"[+] MOVSB: Copied byte 0x" << std::hex << static_cast<int>(byte_val)
+        << L" from [RSI] = 0x" << src
+        << L" to [RDI] = 0x" << dest
+        << L", new RSI = 0x" << g_regs.rsi.q
         << L", new RDI = 0x" << g_regs.rdi.q);
 }
 
@@ -3529,7 +3556,7 @@ void emulate_movd(const ZydisDisassembledInstruction* instr) {
             return;
         }
 
-        __m128 xmm_val = _mm_setzero_ps(); // صفر کردن کل xmm
+        __m128 xmm_val = _mm_setzero_ps(); 
         memcpy(&xmm_val, &mem_val, 4);
 
         if (!write_operand_value<__m128>(dst, 128, xmm_val)) {
@@ -4605,8 +4632,8 @@ int wmain(int argc, wchar_t* argv[]) {
         { ZYDIS_MNEMONIC_SHLD, emulate_shld },
         { ZYDIS_MNEMONIC_SHRD, emulate_shrd },
         { ZYDIS_MNEMONIC_CMOVNS, emulate_cmovns },
-        
-    };
+        { ZYDIS_MNEMONIC_MOVSB, emulate_movsb },
+    }; 
 
     STARTUPINFOW si = { sizeof(si) };
     uint32_t entryRVA = GetEntryPointRVA(exePath);
