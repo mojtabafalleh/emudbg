@@ -27,3 +27,4 @@ Windows API functions are skipped through debugger stepping, allowing seamless e
 1. **Clone the repository**
    ```bash
    git clone https://github.com/yourusername/EmuDbg.git
+   cmake . 
