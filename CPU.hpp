@@ -41,6 +41,9 @@ IMAGE_OPTIONAL_HEADER64 optionalHeader;
 
 // ----------------------- Break point helper ------------------
 
+
+
+
 bool SetBreakpoint(HANDLE hProcess, uint64_t address, BYTE& originalByte) {
     BYTE int3 = 0xCC;
     if (!ReadProcessMemory(hProcess, (LPCVOID)address, &originalByte, 1, nullptr))
@@ -306,6 +309,25 @@ public:
     }
 
     // ------------------- Public Methods -------------------
+
+    void EnableTrapFlag() {
+        CONTEXT ctx = { 0 };
+        ctx.ContextFlags = CONTEXT_ALL;
+
+        if (GetThreadContext(hThread, &ctx)) {
+            ctx.EFlags |= 0x100; // Set Trap Flag (bit 8)
+            SetThreadContext(hThread, &ctx);
+        }
+    }
+    void DisableTrapFlag() {
+        CONTEXT ctx = { 0 };
+        ctx.ContextFlags = CONTEXT_ALL;
+
+        if (GetThreadContext(hThread, &ctx)) {
+            ctx.EFlags &= ~0x100; // Clear Trap Flag (bit 8)
+            SetThreadContext(hThread, &ctx);
+        }
+    }
 
 
     uint64_t start_emulation() {
@@ -4580,6 +4602,8 @@ private:
     }
 
 #endif DB_ENABLED
+
+
 
 };
 

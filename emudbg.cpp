@@ -34,10 +34,17 @@ int wmain(int argc, wchar_t* argv[]) {
         switch (dbgEvent.dwDebugEventCode) {
 
         case CREATE_THREAD_DEBUG_EVENT: {
-
-            // LOG(L"[+] Thread created. ID: " << dbgEvent.dwThreadId);
+            HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
+            if (hThread) {
+                CPU cpu(hThread);           
+                cpu.EnableTrapFlag();        
+                cpuThreads.emplace(dbgEvent.dwThreadId, std::move(cpu));  
+                LOG(L"[+] Thread created and TF enabled. ID: " << dbgEvent.dwThreadId);
+            }
             break;
         }
+
+
 
         case CREATE_PROCESS_DEBUG_EVENT: {
             auto& procInfo = dbgEvent.u.CreateProcessInfo;
@@ -127,7 +134,32 @@ int wmain(int argc, wchar_t* argv[]) {
                 LOG(L"[!] Stack overflow at 0x" << std::hex << exAddr);
                 exit(0);
                 break;
+            case EXCEPTION_SINGLE_STEP: {
+                HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
+                CONTEXT ctx = { 0 };
+                ctx.ContextFlags = CONTEXT_ALL;
 
+                if (hThread && GetThreadContext(hThread, &ctx)) {
+
+                    auto it = cpuThreads.find(dbgEvent.dwThreadId);
+                    if (it != cpuThreads.end()) {
+
+                        CPU& cpu = it->second;
+                        cpu.DisableTrapFlag();
+                        cpu.CPUThreadState = ThreadState::Running;
+                        cpu.UpdateRegistersFromContext(ctx);
+                        uint64_t addr = cpu.start_emulation();
+                        LOG(L"[+] Emulation returned address: 0x" << std::hex << addr);
+
+                        BYTE orig;
+                        if (SetBreakpoint(pi.hProcess, addr, orig))
+                            breakpoints[addr] = orig;
+
+                        cpu.ApplyRegistersToContext(ctx);
+                    }
+                }
+                break;
+            }
             case EXCEPTION_INT_DIVIDE_BY_ZERO:
                 LOG(L"[!] Divide by zero at 0x" << std::hex << exAddr);
                 exit(0);
@@ -142,6 +174,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
             break;
         }
+
 
         case EXIT_THREAD_DEBUG_EVENT: {
             DWORD tid = dbgEvent.dwThreadId;
