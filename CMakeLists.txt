@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 # Check MSVC for ASM
 if(MSVC)
-    set_source_files_properties(xgetbv.asm PROPERTIES LANGUAGE ASM_MASM)
+    set_source_files_properties(asm_function.asm PROPERTIES LANGUAGE ASM_MASM)
 endif()
 
 # Create the main executable
