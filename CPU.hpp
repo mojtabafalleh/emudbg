@@ -34,7 +34,7 @@ enum class ThreadState {
 };
 extern "C" uint64_t __cdecl xgetbv_asm(uint32_t ecx);
 
-bool brakpiont_hit;
+bool breakpoint_hit;
 uint64_t startaddr, endaddr;
 PROCESS_INFORMATION pi;
 IMAGE_OPTIONAL_HEADER64 optionalHeader;

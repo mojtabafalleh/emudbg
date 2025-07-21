@@ -26,7 +26,7 @@ int wmain(int argc, wchar_t* argv[]) {
     while (true) {
         if (!WaitForDebugEvent(&dbgEvent, INFINITE))
             break;
-        if (brakpiont_hit)
+        if (breakpoint_hit)
             break;
 
         DWORD continueStatus = DBG_CONTINUE;
@@ -107,7 +107,7 @@ int wmain(int argc, wchar_t* argv[]) {
                         cpu.ApplyRegistersToContext(ctx);
                     }
 
-                    brakpiont_hit = 0;
+                    breakpoint_hit = 0;
                 }
                 break;
 
