@@ -31,6 +31,7 @@ enum class ThreadState {
     Suspended,
     Sleeping,
     Blocked,
+    Main
 };
 extern "C" uint64_t __cdecl xgetbv_asm(uint32_t ecx);
 

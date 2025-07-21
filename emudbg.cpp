@@ -38,6 +38,7 @@ int wmain(int argc, wchar_t* argv[]) {
             if (hThread) {
                 CPU cpu(hThread);           
                 cpu.EnableTrapFlag();        
+                cpu.CPUThreadState = ThreadState::Unknown;
                 cpuThreads.emplace(dbgEvent.dwThreadId, std::move(cpu));  
                 LOG(L"[+] Thread created and TF enabled. ID: " << dbgEvent.dwThreadId);
             }
