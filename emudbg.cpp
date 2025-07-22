@@ -70,12 +70,15 @@ int wmain(int argc, wchar_t* argv[]) {
                 uint64_t addr = baseAddress + entryRVA;
                 if (SetBreakpoint(pi.hProcess, addr, orig))
                     breakpoints[addr] = orig;
+
             }
 
             for (uint32_t rva : tlsRVAs) {
                 uint64_t addr = baseAddress + rva;
                 if (SetBreakpoint(pi.hProcess, addr, orig))
                     breakpoints[addr] = orig;
+                else
+                    goto cleanup;
             }
 
             break;
@@ -150,7 +153,7 @@ int wmain(int argc, wchar_t* argv[]) {
                         cpu.CPUThreadState = ThreadState::Running;
                         cpu.UpdateRegistersFromContext(ctx);
                         uint64_t addr = cpu.start_emulation();
-                        LOG(L"[+] Emulation returned address: 0x" << std::hex << addr);
+                        LOG(L"[+] [EXCEPTION_SINGLE_STEP]  Emulation returned address: 0x" << std::hex << addr);
 
                         BYTE orig;
                         if (SetBreakpoint(pi.hProcess, addr, orig))
