@@ -337,7 +337,14 @@ public:
         }
     }
 
+    uint64_t getThreadRealRIP() {
 
+        uint64_t val = 0;
+        if (!ReadMemory(g_regs.rdx.q, &val, sizeof(uint64_t))) {
+            LOG(L"[!] Failed to read memory at 0x" << std::hex << g_regs.rdx.q);
+        }
+        return val;
+    }
     uint64_t start_emulation() {
         uint64_t address = g_regs.rip;
         BYTE buffer[16] = { 0 };

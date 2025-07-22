@@ -34,10 +34,19 @@ int wmain(int argc, wchar_t* argv[]) {
         switch (dbgEvent.dwDebugEventCode) {
 
         case CREATE_THREAD_DEBUG_EVENT: {
+            CONTEXT ctx = { 0 };
+            ctx.ContextFlags = CONTEXT_FULL;
             HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
-            if (hThread) {
+            if (hThread && GetThreadContext(hThread, &ctx)) {
                 CPU cpu(hThread);           
-                cpu.EnableTrapFlag();        
+                //cpu.EnableTrapFlag();     
+                cpu.UpdateRegistersFromContext(ctx);
+                uint64_t address = cpu.getThreadRealRIP();
+                if (address) {
+                    BYTE orig;
+                    if (SetBreakpoint(pi.hProcess, address, orig))
+                        breakpoints[address] = orig;
+                }
                 cpu.CPUThreadState = ThreadState::Unknown;
                 cpuThreads.emplace(dbgEvent.dwThreadId, std::move(cpu));  
                 LOG(L"[+] Thread created and TF enabled. ID: " << dbgEvent.dwThreadId);
@@ -139,29 +148,7 @@ int wmain(int argc, wchar_t* argv[]) {
                 exit(0);
                 break;
             case EXCEPTION_SINGLE_STEP: {
-                HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
-                CONTEXT ctx = { 0 };
-                ctx.ContextFlags = CONTEXT_ALL;
 
-                if (hThread && GetThreadContext(hThread, &ctx)) {
-
-                    auto it = cpuThreads.find(dbgEvent.dwThreadId);
-                    if (it != cpuThreads.end()) {
-
-                        CPU& cpu = it->second;
-                        cpu.DisableTrapFlag();
-                        cpu.CPUThreadState = ThreadState::Running;
-                        cpu.UpdateRegistersFromContext(ctx);
-                        uint64_t addr = cpu.start_emulation();
-                        LOG(L"[+] [EXCEPTION_SINGLE_STEP]  Emulation returned address: 0x" << std::hex << addr);
-
-                        BYTE orig;
-                        if (SetBreakpoint(pi.hProcess, addr, orig))
-                            breakpoints[addr] = orig;
-
-                        cpu.ApplyRegistersToContext(ctx);
-                    }
-                }
                 break;
             }
             case EXCEPTION_INT_DIVIDE_BY_ZERO:
