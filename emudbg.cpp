@@ -29,6 +29,22 @@ int wmain(int argc, wchar_t* argv[]) {
 
         switch (dbgEvent.dwDebugEventCode) {
 
+        case LOAD_DLL_DEBUG_EVENT: {
+            auto& loadDll = dbgEvent.u.LoadDll;
+            wchar_t dllName[MAX_PATH] = { 0 };
+
+            if (loadDll.lpImageName && loadDll.fUnicode) {
+                SIZE_T read;
+                ReadProcessMemory(pi.hProcess, loadDll.lpImageName, dllName, sizeof(dllName), &read);
+                LOG(L"[+] DLL Loaded: " << dllName);
+            }
+
+            LOG(L"[+] DLL Base Address: 0x" << std::hex << (uint64_t)loadDll.lpBaseOfDll);
+
+            if (loadDll.hFile) CloseHandle(loadDll.hFile);
+            break;
+        }
+
         case CREATE_THREAD_DEBUG_EVENT: {
             CONTEXT ctx = { 0 };
             ctx.ContextFlags = CONTEXT_FULL;
