@@ -36,21 +36,45 @@ int wmain(int argc, wchar_t* argv[]) {
         case CREATE_THREAD_DEBUG_EVENT: {
             CONTEXT ctx = { 0 };
             ctx.ContextFlags = CONTEXT_FULL;
+
             HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
             if (hThread && GetThreadContext(hThread, &ctx)) {
-                CPU cpu(hThread);           
-                //cpu.EnableTrapFlag();     
-                cpu.UpdateRegistersFromContext(ctx);
-                uint64_t address = cpu.getThreadRealRIP();
-                if (address) {
-                    BYTE orig;
-                    if (SetBreakpoint(pi.hProcess, address, orig))
-                        breakpoints[address] = orig;
+                uint64_t address = 0;
+                uint64_t pointer = ctx.Rdx;
+
+                if (!ReadProcessMemory(pi.hProcess, (LPCVOID)pointer, &address, sizeof(address), nullptr)) {
+                    LOG(L"[-] Failed to read memory at RDX: " << std::hex << pointer << L", Error: " << GetLastError());
                 }
-                cpu.CPUThreadState = ThreadState::Unknown;
-                cpuThreads.emplace(dbgEvent.dwThreadId, std::move(cpu));  
-                LOG(L"[+] Thread created and TF enabled. ID: " << dbgEvent.dwThreadId);
+                else {
+                    LOG(L"[+] Read value from [RDX]: " << std::hex << address);
+                }
+
+                if (address >= startaddr && address <= endaddr) {
+                    if (breakpoints.find(address) == breakpoints.end()) {
+                        CPU cpu(hThread);
+                        BYTE orig;
+
+                        if (SetBreakpoint(pi.hProcess, address, orig)) {
+                            breakpoints[address] = orig;
+                            LOG("addr : " << address << " orig : " << orig);
+                            cpu.CPUThreadState = ThreadState::Unknown;
+                            cpuThreads.emplace(dbgEvent.dwThreadId, std::move(cpu));
+
+                            LOG(L"[+] Breakpoint set at address: " << std::hex << address);
+                        }
+                        else {
+                            LOG(L"[-] Failed to set breakpoint at: " << std::hex << address);
+                        }
+                    }
+                    else {
+                        LOG(L"[=] Breakpoint already exists at: " << std::hex << address);
+                    }
+                }
+
+
             }
+
+            if (hThread) CloseHandle(hThread);
             break;
         }
 
@@ -77,8 +101,11 @@ int wmain(int argc, wchar_t* argv[]) {
             BYTE orig;
             if (entryRVA) {
                 uint64_t addr = baseAddress + entryRVA;
-                if (SetBreakpoint(pi.hProcess, addr, orig))
+                if (SetBreakpoint(pi.hProcess, addr, orig)) {
                     breakpoints[addr] = orig;
+
+                }
+
 
             }
 
@@ -86,8 +113,7 @@ int wmain(int argc, wchar_t* argv[]) {
                 uint64_t addr = baseAddress + rva;
                 if (SetBreakpoint(pi.hProcess, addr, orig))
                     breakpoints[addr] = orig;
-                else
-                    goto cleanup;
+
             }
 
             break;

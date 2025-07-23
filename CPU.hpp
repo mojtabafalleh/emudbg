@@ -45,6 +45,7 @@ IMAGE_OPTIONAL_HEADER64 optionalHeader;
 
 
 bool SetBreakpoint(HANDLE hProcess, uint64_t address, BYTE& originalByte) {
+
     BYTE int3 = 0xCC;
     if (!ReadProcessMemory(hProcess, (LPCVOID)address, &originalByte, 1, nullptr))
         return false;
@@ -636,12 +637,6 @@ public:
     }
     bool ApplyRegistersToContext(CONTEXT& ctx) {
 
-        ctx.ContextFlags = CONTEXT_FULL;
-
-        if (!GetThreadContext(hThread, &ctx)) {
-            std::wcerr << L"[!] Failed to get thread context" << std::endl;
-            return false;
-        }
 
         ctx.Rip = g_regs.rip;
         ctx.Rsp = g_regs.rsp.q;
