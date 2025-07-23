@@ -20,6 +20,10 @@
 #define LOG(x)
 #endif
 
+struct BreakpointInfo {
+    BYTE originalByte;
+    int remainingHits;  
+};
 
 
 enum class ThreadState {
