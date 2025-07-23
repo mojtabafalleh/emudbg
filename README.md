@@ -4,7 +4,7 @@
 
 ---
 
-## ✨ Features
+## ✨ how it work ?
 
 - Run any **.exe** in debug mode  
 - Disassemble instructions using **Zydis**  
