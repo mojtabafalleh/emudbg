@@ -13,7 +13,7 @@
 #include <tlhelp32.h>
 
 
-#define LOG_ENABLED 0
+#define LOG_ENABLED 1
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
@@ -419,6 +419,7 @@ public:
                             g_regs.rip += instr.length;
                         }
 
+
 #if DB_ENABLED
                         SingleStepAndCompare(pi.hProcess, pi.hThread);
 #endif
@@ -434,13 +435,15 @@ public:
                 address = g_regs.rip;
 
                 // check if out of bounds, handle accordingly
-                if (!(address >= startaddr && address <= endaddr)) {
-                    uint64_t value = 0;
-                    ReadMemory(g_regs.rsp.q, &value, 8);
-                    //SetSingleBreakpointAndEmulate(pi.hProcess, value, pi.hThread);
-                    //address = g_regs.rip;
-                    //break;
-                    return value;
+                if (disasm.IsJump() ||
+                    instr.mnemonic == ZYDIS_MNEMONIC_CALL ||
+                    instr.mnemonic == ZYDIS_MNEMONIC_RET)
+                {
+                    if (!(address >= startaddr && address <= endaddr)) {
+                        uint64_t value = 0;
+                        ReadMemory(g_regs.rsp.q, &value, 8);
+                        return value;
+                    }
                 }
             }
             else {
