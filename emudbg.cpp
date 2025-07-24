@@ -5,11 +5,29 @@ std::unordered_map<DWORD, CPU> cpuThreads;
 
 int wmain(int argc, wchar_t* argv[]) {
     if (argc < 2) {
-        wprintf(L"Usage: %s <path_to_exe>\n", argv[0]);
+        wprintf(L"Usage: %s <exe_path> [-m target.dll]\n", argv[0]);
         return 1;
     }
 
-    std::wstring exePath = argv[1];
+    std::wstring exePath;
+    std::wstring targetModuleName;
+    bool waitForModule = false;
+
+    for (int i = 1; i < argc; ++i) {
+        std::wstring arg = argv[i];
+        if (arg == L"-m" && i + 1 < argc) {
+            targetModuleName = argv[++i];
+            waitForModule = true;
+        }
+        else {
+            exePath = arg;
+        }
+    }
+
+    if (exePath.empty()) {
+        wprintf(L"Usage: %s <exe_path> [-m target.dll]\n", argv[0]);
+        return 1;
+    }
 
     STARTUPINFOW si = { sizeof(si) };
     uint32_t entryRVA = GetEntryPointRVA(exePath);
@@ -19,6 +37,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
     DEBUG_EVENT dbgEvent = {};
     uint64_t baseAddress = 0;
+    uint64_t moduleBase = 0;
     std::unordered_map<uint64_t, BreakpointInfo> breakpoints;
 
     while (true) {
@@ -29,6 +48,53 @@ int wmain(int argc, wchar_t* argv[]) {
 
         switch (dbgEvent.dwDebugEventCode) {
 
+        case LOAD_DLL_DEBUG_EVENT: {
+            auto& ld = dbgEvent.u.LoadDll;
+            std::wstring loadedName;
+
+            if (ld.lpImageName && ld.fUnicode) {
+                ULONGLONG ptr = 0;
+                if (ReadProcessMemory(pi.hProcess, (LPCVOID)ld.lpImageName, &ptr, sizeof(ptr), nullptr) && ptr) {
+                    wchar_t buffer[MAX_PATH] = {};
+                    if (ReadProcessMemory(pi.hProcess, (LPCVOID)ptr, buffer, sizeof(buffer) - sizeof(wchar_t), nullptr)) {
+                        loadedName = std::wstring(buffer);
+                        std::wstring lowerLoaded = loadedName;
+                        std::transform(lowerLoaded.begin(), lowerLoaded.end(), lowerLoaded.begin(), ::towlower);
+                        std::wstring lowerTarget = targetModuleName;
+                        std::transform(lowerTarget.begin(), lowerTarget.end(), lowerTarget.begin(), ::towlower);
+
+                        if (waitForModule && lowerLoaded.find(lowerTarget) != std::wstring::npos) {
+                            LOG(L"[+] Target DLL loaded: " << loadedName);
+                            moduleBase = (uint64_t)ld.lpBaseOfDll;
+
+                            uint32_t modEntryRVA = GetEntryPointRVA(buffer);
+                            auto modTLSRVAs = GetTLSCallbackRVAs(buffer);
+                            valid_ranges.emplace_back(moduleBase, moduleBase + optionalHeader.SizeOfImage);
+
+                            BYTE orig;
+                            if (modEntryRVA) {
+                                uint64_t addr = moduleBase + modEntryRVA;
+                                if (SetBreakpoint(pi.hProcess, addr, orig)) {
+                                    breakpoints[addr] = { orig, 1 };
+                                    LOG(L"[+] Breakpoint set at DLL EntryPoint: 0x" << std::hex << addr);
+                                }
+                            }
+
+                            for (auto rva : modTLSRVAs) {
+                                uint64_t addr = moduleBase + rva;
+                                if (SetBreakpoint(pi.hProcess, addr, orig)) {
+                                    breakpoints[addr] = { orig, 1 };
+                                    LOG(L"[+] Breakpoint set at DLL TLS Callback: 0x" << std::hex << addr);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (ld.hFile) CloseHandle(ld.hFile);
+            break;
+        }
 
         case CREATE_THREAD_DEBUG_EVENT: {
             CONTEXT ctx = { 0 };
@@ -36,32 +102,6 @@ int wmain(int argc, wchar_t* argv[]) {
 
             HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
             if (hThread && GetThreadContext(hThread, &ctx)) {
-                uint64_t pointer = ctx.Rdx;
-                uint64_t address = 0;
-
-                if (!ReadProcessMemory(pi.hProcess, (LPCVOID)pointer, &address, sizeof(address), nullptr)) {
-                    LOG(L"[-] Failed to read memory at RDX: " << std::hex << pointer);
-                }
-                else {
-                    LOG(L"[+] Read value from [RDX]: " << std::hex << address);
-
-                    if (address >= startaddr && address <= endaddr) {
-                        BYTE orig;
-                        if (breakpoints.find(address) == breakpoints.end()) {
-                            if (SetBreakpoint(pi.hProcess, address, orig)) {
-                                breakpoints[address] = { orig, 1 };
-                                LOG(L"[+] Breakpoint set at: " << std::hex << address);
-                            }
-                            else {
-                                LOG(L"[-] Failed to set breakpoint at: " << std::hex << address);
-                            }
-                        }
-                        else {
-                            breakpoints[address].remainingHits++;
-                            LOG(L"[=] Breakpoint exists. Incremented hit count: " << breakpoints[address].remainingHits);
-                        }
-                    }
-                }
                 cpuThreads.emplace(dbgEvent.dwThreadId, CPU(hThread));
             }
 
@@ -72,8 +112,8 @@ int wmain(int argc, wchar_t* argv[]) {
         case CREATE_PROCESS_DEBUG_EVENT: {
             auto& procInfo = dbgEvent.u.CreateProcessInfo;
             baseAddress = reinterpret_cast<uint64_t>(procInfo.lpBaseOfImage);
-            endaddr = baseAddress + optionalHeader.SizeOfImage;
-            startaddr = baseAddress;
+            valid_ranges.emplace_back(baseAddress, baseAddress + optionalHeader.SizeOfImage);
+
 
             LOG(L"[+] Process created. Base address: 0x" << std::hex << baseAddress);
 
@@ -82,18 +122,20 @@ int wmain(int argc, wchar_t* argv[]) {
                 cpuThreads.emplace(dbgEvent.dwThreadId, CPU(hThread));
             }
 
-            BYTE orig;
-            if (entryRVA) {
-                uint64_t addr = baseAddress + entryRVA;
-                if (SetBreakpoint(pi.hProcess, addr, orig)) {
-                    breakpoints[addr] = { orig, 1 };
+            if (!waitForModule) {
+                BYTE orig;
+                if (entryRVA) {
+                    uint64_t addr = baseAddress + entryRVA;
+                    if (SetBreakpoint(pi.hProcess, addr, orig)) {
+                        breakpoints[addr] = { orig, 1 };
+                    }
                 }
-            }
 
-            for (uint32_t rva : tlsRVAs) {
-                uint64_t addr = baseAddress + rva;
-                if (SetBreakpoint(pi.hProcess, addr, orig)) {
-                    breakpoints[addr] = { orig, 1 };
+                for (auto rva : tlsRVAs) {
+                    uint64_t addr = baseAddress + rva;
+                    if (SetBreakpoint(pi.hProcess, addr, orig)) {
+                        breakpoints[addr] = { orig, 1 };
+                    }
                 }
             }
 
@@ -109,8 +151,6 @@ int wmain(int argc, wchar_t* argv[]) {
             case EXCEPTION_BREAKPOINT:
                 if (breakpoints.count(exAddr)) {
                     auto& bp = breakpoints[exAddr];
-
-                    // Remove temporarily
                     RemoveBreakpoint(pi.hProcess, exAddr, bp.originalByte);
 
                     CONTEXT ctx = { 0 };
@@ -135,7 +175,6 @@ int wmain(int argc, wchar_t* argv[]) {
                         bp.remainingHits--;
                         if (bp.remainingHits > 0) {
                             SetBreakpoint(pi.hProcess, exAddr, bp.originalByte);
-                            LOG(L"[=] Breakpoint re-set at: 0x" << std::hex << exAddr << L" | Remaining hits: " << bp.remainingHits);
                         }
                         else {
                             breakpoints.erase(exAddr);
@@ -151,9 +190,7 @@ int wmain(int argc, wchar_t* argv[]) {
                         }
                         else {
                             breakpoints[addr].remainingHits++;
-                            LOG(L"[=] Breakpoint already exists at 0x" << std::hex << addr << L", incremented hit count to " << breakpoints[addr].remainingHits);
                         }
-
                     }
 
                     if (hThread) CloseHandle(hThread);
@@ -164,38 +201,27 @@ int wmain(int argc, wchar_t* argv[]) {
             case EXCEPTION_ACCESS_VIOLATION:
                 LOG(L"[!] Access Violation at 0x" << std::hex << exAddr);
                 exit(0);
-                break;
-
             case EXCEPTION_ILLEGAL_INSTRUCTION:
                 LOG(L"[!] Illegal instruction at 0x" << std::hex << exAddr);
                 exit(0);
-                break;
-
             case EXCEPTION_STACK_OVERFLOW:
                 LOG(L"[!] Stack overflow at 0x" << std::hex << exAddr);
                 exit(0);
-                break;
-
             case EXCEPTION_INT_DIVIDE_BY_ZERO:
                 LOG(L"[!] Divide by zero at 0x" << std::hex << exAddr);
                 exit(0);
-                break;
-
             default:
                 LOG(L"[!] Unhandled exception 0x" << std::hex << exceptionCode << L" at 0x" << exAddr);
                 exit(0);
-                break;
             }
 
             break;
         }
 
-        case EXIT_THREAD_DEBUG_EVENT: {
-            DWORD tid = dbgEvent.dwThreadId;
-            cpuThreads.erase(tid);
-            LOG(L"[-] CPU destroyed for Thread ID: " << tid);
+        case EXIT_THREAD_DEBUG_EVENT:
+            cpuThreads.erase(dbgEvent.dwThreadId);
+            LOG(L"[-] CPU destroyed for Thread ID: " << dbgEvent.dwThreadId);
             break;
-        }
 
         case EXIT_PROCESS_DEBUG_EVENT:
             LOG(L"[+] Process exited.");

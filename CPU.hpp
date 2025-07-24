@@ -12,8 +12,8 @@
 #include "deps/zydis_wrapper.h"
 #include <tlhelp32.h>
 
-
-#define LOG_ENABLED 1
+int RunEmulation(const std::wstring& exePath);
+#define LOG_ENABLED 0
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
@@ -39,7 +39,7 @@ enum class ThreadState {
 extern "C" uint64_t __cdecl xgetbv_asm(uint32_t ecx);
 
 bool breakpoint_hit;
-uint64_t startaddr, endaddr;
+std::vector<std::pair<uint64_t, uint64_t>> valid_ranges;
 PROCESS_INFORMATION pi;
 IMAGE_OPTIONAL_HEADER64 optionalHeader;
 
@@ -314,6 +314,8 @@ public:
             { ZYDIS_MNEMONIC_SETNB, &CPU::emulate_setnb },
             { ZYDIS_MNEMONIC_SCASD, &CPU::emulate_scasd },
             { ZYDIS_MNEMONIC_BSR, &CPU::emulate_bsr },
+            { ZYDIS_MNEMONIC_PUNPCKLBW, &CPU::emulate_punpcklbw },
+            { ZYDIS_MNEMONIC_CMOVO, &CPU::emulate_cmovo },
             
             
         };
@@ -358,8 +360,13 @@ public:
 
         while (true) {
 
-            if (!ReadProcessMemory(pi.hProcess, (LPCVOID)address, buffer, sizeof(buffer), &bytesRead) || bytesRead == 0)
+            if (!ReadProcessMemory(pi.hProcess, (LPCVOID)address, buffer, sizeof(buffer), &bytesRead) || bytesRead == 0) {
+                DWORD err = GetLastError();
+                LOG(L"[!] Failed to read memory at 0x" << std::hex << address
+                    << L", GetLastError = " << std::dec << err);
                 break;
+            }
+
 
             if (disasm.Disassemble(address, buffer, bytesRead)) {
 #if DB_ENABLED
@@ -383,6 +390,11 @@ public:
                     LOG(L"[~] REP prefix detected.");
                 if (has_VEX)
                     LOG(L"[~] VEX prefix detected.");
+                if (instr.mnemonic == ZYDIS_MNEMONIC_SYSCALL )
+                {
+                    LOG("[+] syscall in : " << g_regs.rip << " rax : " << g_regs.rax.q);
+                    return g_regs.rip + instr.length;
+                }
 
                 auto it = dispatch_table.find(instr.mnemonic);
                 if (it != dispatch_table.end()) {
@@ -439,7 +451,7 @@ public:
                     instr.mnemonic == ZYDIS_MNEMONIC_CALL ||
                     instr.mnemonic == ZYDIS_MNEMONIC_RET)
                 {
-                    if (!(address >= startaddr && address <= endaddr)) {
+                    if (!IsInEmulationRange(address)) {
                         uint64_t value = 0;
                         ReadMemory(g_regs.rsp.q, &value, 8);
                         return value;
@@ -452,7 +464,7 @@ public:
             }
         }
 
-
+        return -1;
     }
 
 
@@ -2800,6 +2812,40 @@ private:
             << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0));
     }
 
+    void emulate_punpcklbw(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+
+        __m128i dst_val, src_val;
+        if (!read_operand_value(dst, 128, dst_val) || !read_operand_value(src, 128, src_val)) {
+            LOG(L"[!] Unsupported operands for PUNPCKLBW");
+            return;
+        }
+
+        alignas(16) uint8_t dst_bytes[16], src_bytes[16], result_bytes[16];
+
+        _mm_store_si128((__m128i*)dst_bytes, dst_val);
+        _mm_store_si128((__m128i*)src_bytes, src_val);
+
+        // Interleave lower 8 bytes of dst and src as words
+        for (int i = 0; i < 8; ++i) {
+            result_bytes[i * 2] = dst_bytes[i];
+            result_bytes[i * 2 + 1] = src_bytes[i];
+        }
+
+        // Zero the upper 8 words
+        for (int i = 16; i < 32; ++i) {
+            result_bytes[i % 16] = 0;
+        }
+
+        __m128i result = _mm_load_si128((__m128i*)result_bytes);
+        write_operand_value(dst, 128, result);
+
+        LOG(L"[+] PUNPCKLBW xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
+            << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0));
+    }
+
+
     void emulate_shrd(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
         const auto& src = instr->operands[1];
@@ -4275,6 +4321,31 @@ private:
             << ZydisRegisterGetString(dst.reg.value));
     }
 
+    void emulate_cmovo(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+
+        if (g_regs.rflags.flags.OF == 0) {
+            LOG(L"[+] CMOVO skipped (OF == 0)");
+            return;
+        }
+
+        uint64_t value = 0;
+        if (!read_operand_value(src, instr->info.operand_width, value)) {
+            LOG(L"[!] Failed to read source operand for CMOVO");
+            return;
+        }
+
+        if (!write_operand_value(dst, instr->info.operand_width, value)) {
+            LOG(L"[!] Failed to write destination operand for CMOVO");
+            return;
+        }
+
+        LOG(L"[+] CMOVO executed: moved 0x" << std::hex << value << L" to "
+            << ZydisRegisterGetString(dst.reg.value));
+    }
+
+
     void emulate_vmovaps(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
         const auto& src = instr->operands[1];
@@ -4869,6 +4940,13 @@ private:
 
 #endif DB_ENABLED
 
+    bool IsInEmulationRange(uint64_t addr) {
+        for (const auto& range : valid_ranges) {
+            if (addr >= range.first && addr <= range.second)
+                return true;
+        }
+        return false;
+    }
 
 
 };
