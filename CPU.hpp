@@ -197,7 +197,7 @@ public:
     // ------------------- CPU Context -------------------
     HANDLE hThread;
     //test with real cpu 
-#define DB_ENABLED 0
+#define DB_ENABLED 1
 #if DB_ENABLED
     memory_mange my_mange;
     bool is_cpuid;
@@ -316,6 +316,8 @@ public:
             { ZYDIS_MNEMONIC_BSR, &CPU::emulate_bsr },
             { ZYDIS_MNEMONIC_PUNPCKLBW, &CPU::emulate_punpcklbw },
             { ZYDIS_MNEMONIC_CMOVO, &CPU::emulate_cmovo },
+            { ZYDIS_MNEMONIC_BSWAP, &CPU::emulate_bswap },
+            { ZYDIS_MNEMONIC_CMOVP, &CPU::emulate_cmovp },
             
             
         };
@@ -440,7 +442,7 @@ public:
                 }
                 else {
                     std::wcout << L"[!] Instruction not implemented: "
-                        << std::wstring(instrText.begin(), instrText.end()) << std::endl;
+                        << std::wstring(instrText.begin(), instrText.end()) << " at : " <<std::hex <<g_regs.rip << std::endl;
                     exit(0);
                 }
 
@@ -1482,6 +1484,29 @@ private:
 
         LOG(L"[+] MOVDQU executed");
     }
+    void emulate_cmovp(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+
+        if (g_regs.rflags.flags.PF == 0) {
+            LOG(L"[+] CMOVP skipped (PF == 0)");
+            return;
+        }
+
+        uint64_t value = 0;
+        if (!read_operand_value(src, instr->info.operand_width, value)) {
+            LOG(L"[!] Failed to read source operand for CMOVP");
+            return;
+        }
+
+        if (!write_operand_value(dst, instr->info.operand_width, value)) {
+            LOG(L"[!] Failed to write destination operand for CMOVP");
+            return;
+        }
+
+        LOG(L"[+] CMOVP executed: moved 0x" << std::hex << value << L" to "
+            << ZydisRegisterGetString(dst.reg.value));
+    }
 
     void emulate_xadd(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
@@ -2357,6 +2382,44 @@ private:
         }
 
         LOG(L"[+] DIV executed: divisor = 0x" << std::hex << divisor);
+    }
+    void emulate_bswap(const ZydisDisassembledInstruction* instr) {
+        const auto& op = instr->operands[0];
+
+        if (op.type != ZYDIS_OPERAND_TYPE_REGISTER) {
+            LOG(L"[!] BSWAP only supports register operands.");
+            return;
+        }
+
+        uint64_t value = 0;
+        if (!read_operand_value(op, instr->info.operand_width, value)) {
+            LOG(L"[!] Failed to read register for BSWAP.");
+            return;
+        }
+
+        uint64_t result = 0;
+        switch (instr->info.operand_width) {
+        case 16: // Technically invalid for BSWAP — optional warning
+            LOG(L"[!] BSWAP does not support 16-bit operands.");
+            return;
+        case 32:
+            result = _byteswap_ulong(static_cast<uint32_t>(value));
+            break;
+        case 64:
+            result = _byteswap_uint64(value);
+            break;
+        default:
+            LOG(L"[!] Unsupported operand width for BSWAP: " << instr->info.operand_width);
+            return;
+        }
+
+        if (!write_operand_value(op, instr->info.operand_width, result)) {
+            LOG(L"[!] Failed to write register for BSWAP.");
+            return;
+        }
+
+        LOG(L"[+] BSWAP executed: 0x" << std::hex << value << L" -> 0x" << result
+            << L" (" << ZydisRegisterGetString(op.reg.value) << L")");
     }
 
     void emulate_rcr(const ZydisDisassembledInstruction* instr) {
