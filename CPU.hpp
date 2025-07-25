@@ -1213,6 +1213,12 @@ private:
                     "[PEB] Reading (" << description.c_str() << ") at 0x" << std::hex << address << " [RIP: 0x" << std::hex << g_regs.rip << "]");
             }
         }
+        if (IsInEmulationRange(address)) {
+            LOG_analyze(BRIGHT_WHITE,
+                "[+] READ FROM executable memory detected | Target: 0x" << std::hex << address <<
+                " | RIP: 0x" << std::hex << g_regs.rip
+            );
+        }
 #endif
 
         SIZE_T bytesRead;
@@ -1221,7 +1227,15 @@ private:
 
     bool WriteMemory(uint64_t address, const void* buffer, SIZE_T size) {
         SIZE_T bytesWritten;
+#if analyze_ENABLED
 
+        if (IsInEmulationRange(address)) {
+            LOG_analyze(GREEN,
+                "[+] Write to executable memory detected | Target: 0x" << std::hex << address <<
+                " | RIP: 0x" << std::hex << g_regs.rip
+            );
+        }
+#endif 
 #if DB_ENABLED
         my_mange.address = address;
         my_mange.size = size;
