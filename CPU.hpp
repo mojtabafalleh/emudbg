@@ -48,10 +48,9 @@ std::vector<std::pair<uint64_t, uint64_t>> valid_ranges;
 PROCESS_INFORMATION pi;
 IMAGE_OPTIONAL_HEADER64 optionalHeader;
 
-#define analyze_ENABLED 0
+#define analyze_ENABLED 1
 #if analyze_ENABLED
 #include <psapi.h>
-uint64_t peb_address = 0;
 struct ExportedFunctionInfo {
     std::unordered_map<uint64_t, std::string> addrToName;
 };
@@ -901,7 +900,7 @@ public:
         }
 #if analyze_ENABLED
         SIZE_T read_peb;
-        ReadProcessMemory(pi.hProcess, (LPCVOID)(g_regs.gs_base + 0x60), &peb_address, sizeof(peb_address), &read_peb) && read_peb == sizeof(peb_address);
+        ReadProcessMemory(pi.hProcess, (LPCVOID)(g_regs.gs_base + 0x60), &g_regs.peb_address, sizeof(g_regs.peb_address), &read_peb) && read_peb == sizeof(g_regs.peb_address);
 #endif
         reg_lookup = {
             // RAX family
@@ -1101,6 +1100,7 @@ private:
         YMM ymm[16];
         uint64_t gs_base;
         uint64_t fs_base;
+        uint64_t peb_address;
     } g_regs;
     std::unordered_map<ZydisMnemonic, void (CPU::*)(const ZydisDisassembledInstruction*)> dispatch_table;
     std::unordered_map<ZydisRegister, void* > reg_lookup;
@@ -1193,9 +1193,9 @@ private:
         // PEB
 
 
-        if (peb_address) {
-            if (address >= peb_address && address < peb_address + 0x1000) {
-                uint64_t offset = address - peb_address;
+        if (g_regs.peb_address) {
+            if (address >= g_regs.peb_address && address < g_regs.peb_address + 0x1000) {
+                uint64_t offset = address - g_regs.peb_address;
                 std::string description = "Unknown";
 
                 auto it = peb_offsets.upper_bound(offset);
@@ -1210,8 +1210,7 @@ private:
                 }
 
                 LOG_analyze(CYAN,
-                    "[PEB] Reading (%s) at 0x%llx [RIP: 0x%llx]",
-                    description.c_str(), address, g_regs.rip);
+                    "[PEB] Reading (" << description.c_str() << ") at 0x" << std::hex << address << " [RIP: 0x" << std::hex << g_regs.rip << "]");
             }
         }
 #endif
