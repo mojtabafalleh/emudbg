@@ -5,7 +5,7 @@
 ---
 
 ## ✨ how it work ?
-
+![Splash](https://github.com/mojtabafalleh/emudbg/blob/master/doc/Screenshot%202025-07-25%20184628.png)
 - Run any **.exe** in debug mode  
 - Disassemble instructions using **Zydis**  
 - Directly emulate assembly instructions  
