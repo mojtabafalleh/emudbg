@@ -12,13 +12,18 @@
 #include "deps/zydis_wrapper.h"
 #include <tlhelp32.h>
 
-int RunEmulation(const std::wstring& exePath);
 #define LOG_ENABLED 0
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
 #define LOG(x)
 #endif
+
+#include <windows.h>
+#include <iostream>
+
+
+
 
 struct BreakpointInfo {
     BYTE originalByte;
@@ -43,6 +48,359 @@ std::vector<std::pair<uint64_t, uint64_t>> valid_ranges;
 PROCESS_INFORMATION pi;
 IMAGE_OPTIONAL_HEADER64 optionalHeader;
 
+#define analyze_ENABLED 1
+#if analyze_ENABLED
+#include <psapi.h>
+uint64_t peb_address = 0;
+struct ExportedFunctionInfo {
+    std::unordered_map<uint64_t, std::string> addrToName;
+};
+std::unordered_map<uint64_t, ExportedFunctionInfo> exportsCache_;
+DWORD RvaToOffset(LPVOID fileBase, DWORD rva) {
+    auto dos = reinterpret_cast<PIMAGE_DOS_HEADER>(fileBase);
+    auto nt = reinterpret_cast<PIMAGE_NT_HEADERS>((BYTE*)fileBase + dos->e_lfanew);
+    auto section = IMAGE_FIRST_SECTION(nt);
+
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
+        DWORD start = section->VirtualAddress;
+        DWORD size = section->Misc.VirtualSize;
+        if (rva >= start && rva < start + size) {
+            return section->PointerToRawData + (rva - start);
+        }
+    }
+    return 0;
+}
+std::string GetExportedFunctionNameByAddress(uint64_t addr) {
+    HMODULE hMods[1024];
+    DWORD cbNeeded;
+
+    if (!EnumProcessModules(pi.hProcess, hMods, sizeof(hMods), &cbNeeded))
+        return "";
+
+    for (DWORD i = 0; i < cbNeeded / sizeof(HMODULE); ++i) {
+        MODULEINFO modInfo;
+        if (!GetModuleInformation(pi.hProcess, hMods[i], &modInfo, sizeof(modInfo)))
+            continue;
+
+        uint64_t base = reinterpret_cast<uint64_t>(modInfo.lpBaseOfDll);
+        uint64_t end = base + modInfo.SizeOfImage;
+        if (addr < base || addr >= end)
+            continue;
+
+        // Check if cache exists
+        auto it = exportsCache_.find(base);
+        if (it != exportsCache_.end()) {
+            const auto& map = it->second.addrToName;
+            auto found = map.find(addr);
+            if (found != map.end())
+                return found->second;
+        }
+
+        // Load the module from disk
+        char path[MAX_PATH];
+        if (!GetModuleFileNameExA(pi.hProcess, hMods[i], path, MAX_PATH))
+            continue;
+
+        HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hFile == INVALID_HANDLE_VALUE)
+            continue;
+
+        HANDLE hMap = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+        if (!hMap) {
+            CloseHandle(hFile);
+            continue;
+        }
+
+        LPVOID baseMap = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+        if (!baseMap) {
+            CloseHandle(hMap);
+            CloseHandle(hFile);
+            continue;
+        }
+
+        auto dos = reinterpret_cast<PIMAGE_DOS_HEADER>(baseMap);
+        auto nt = reinterpret_cast<PIMAGE_NT_HEADERS>((BYTE*)baseMap + dos->e_lfanew);
+
+        DWORD exportRVA = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+        if (!exportRVA) {
+            UnmapViewOfFile(baseMap);
+            CloseHandle(hMap);
+            CloseHandle(hFile);
+            continue;
+        }
+
+        auto exportDir = reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>((BYTE*)baseMap + RvaToOffset(baseMap, exportRVA));
+        DWORD* functions = (DWORD*)((BYTE*)baseMap + RvaToOffset(baseMap, exportDir->AddressOfFunctions));
+        DWORD* names = (DWORD*)((BYTE*)baseMap + RvaToOffset(baseMap, exportDir->AddressOfNames));
+        WORD* ordinals = (WORD*)((BYTE*)baseMap + RvaToOffset(baseMap, exportDir->AddressOfNameOrdinals));
+
+        ExportedFunctionInfo info;
+
+        for (DWORD j = 0; j < exportDir->NumberOfFunctions; ++j) {
+            uint64_t funcAddr = base + functions[j];
+            std::string funcName;
+
+            for (DWORD k = 0; k < exportDir->NumberOfNames; ++k) {
+                if (ordinals[k] == j) {
+                    const char* name = (const char*)baseMap + RvaToOffset(baseMap, names[k]);
+                    funcName = name;
+                    break;
+                }
+            }
+
+            info.addrToName[funcAddr] = funcName;
+        }
+
+        // Clean up
+        UnmapViewOfFile(baseMap);
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+
+        exportsCache_[base] = std::move(info);
+
+        auto found = exportsCache_[base].addrToName.find(addr);
+        if (found != exportsCache_[base].addrToName.end())
+            return found->second;
+
+        return "";
+    }
+
+    return "";
+}
+
+static const std::map<uint64_t, std::string> kuser_shared_data_offsets = {
+    {0x000, "TickCountLowDeprecated"},                // ULONG
+    {0x004, "TickCountMultiplier"},                  // ULONG
+    {0x008, "InterruptTime"},                        // KSYSTEM_TIME
+    {0x010, "SystemTime"},                           // KSYSTEM_TIME
+    {0x018, "TimeZoneBias"},                         // KSYSTEM_TIME
+    {0x020, "ImageNumberLow"},                       // USHORT
+    {0x022, "ImageNumberHigh"},                      // USHORT
+    {0x024, "NtSystemRoot[260]"},                    // WCHAR[260]
+    {0x22C, "MaxStackTraceDepth"},                   // ULONG
+    {0x230, "CryptoExponent"},                       // ULONG
+    {0x234, "TimeZoneId"},                           // ULONG
+    {0x238, "LargePageMinimum"},                     // ULONG
+    {0x23C, "AitSamplingValue"},                     // ULONG
+    {0x240, "AppCompatFlag"},                        // ULONG
+    {0x244, "RNGSeedVersion"},                       // ULONGLONG
+    {0x24C, "GlobalValidationRunlevel"},             // ULONG
+    {0x250, "TimeZoneBiasStamp"},                    // LONG
+    {0x254, "NtBuildNumber"},                        // ULONG
+    {0x258, "NtProductType"},                        // NT_PRODUCT_TYPE (ULONG)
+    {0x25C, "ProductTypeIsValid"},                   // BOOLEAN
+    {0x25D, "Reserved0[1]"},                         // BOOLEAN
+    {0x25E, "NativeProcessorArchitecture"},          // USHORT
+    {0x260, "NtMajorVersion"},                       // ULONG
+    {0x264, "NtMinorVersion"},                       // ULONG
+    {0x268, "ProcessorFeatures[64]"},                // BOOLEAN[64]
+    {0x2A8, "Reserved1"},                            // ULONG
+    {0x2AC, "Reserved3"},                            // ULONG
+    {0x2B0, "TimeSlip"},                             // ULONG
+    {0x2B4, "AlternativeArchitecture"},              // ULONG
+    {0x2B8, "BootId"},                               // ULONG
+    {0x2C0, "SystemExpirationDate"},                 // LARGE_INTEGER
+    {0x2C8, "SuiteMask"},                            // ULONG
+    {0x2CC, "KdDebuggerEnabled"},                    // BOOLEAN
+    {0x2CD, "MitigationPolicies"},                   // UCHAR (bitfield)
+    {0x2CE, "CyclesPerYield"},                       // USHORT
+    {0x2D0, "ActiveConsoleId"},                      // ULONG
+    {0x2D4, "DismountCount"},                        // ULONG
+    {0x2D8, "ComPlusPackage"},                       // ULONG
+    {0x2DC, "LastSystemRITEventTickCount"},          // ULONG
+    {0x2E0, "NumberOfPhysicalPages"},                // ULONG
+    {0x2E4, "SafeBootMode"},                         // BOOLEAN
+    {0x2E5, "VirtualizationFlags"},                  // UCHAR
+    {0x2E6, "Reserved12[2]"},                        // UCHAR[2]
+    {0x2E8, "SharedDataFlags"},                      // ULONG (bitfield)
+    {0x2EC, "DataFlagsPad[1]"},                      // ULONG
+    {0x2F0, "TestRetInstruction"},                   // ULONGLONG
+    {0x2F8, "QpcFrequency"},                         // LONGLONG
+    {0x300, "SystemCall"},                           // ULONG
+    {0x304, "Reserved2"},                            // ULONG
+    {0x308, "FullNumberOfPhysicalPages"},            // ULONGLONG
+    {0x310, "SystemCallPad[1]"},                     // ULONGLONG
+    {0x318, "TickCount"},                            // KSYSTEM_TIME (union variant)
+    {0x324, "TickCountPad[1]"},                      // ULONG
+    {0x328, "Cookie"},                               // ULONG
+    {0x32C, "CookiePad[1]"},                         // ULONG
+    {0x330, "ConsoleSessionForegroundProcessId"},    // LONGLONG
+    {0x338, "TimeUpdateLock"},                       // ULONGLONG
+    {0x340, "BaselineSystemTimeQpc"},                // ULONGLONG
+    {0x348, "BaselineInterruptTimeQpc"},             // ULONGLONG
+    {0x350, "QpcSystemTimeIncrement"},               // ULONGLONG
+    {0x358, "QpcInterruptTimeIncrement"},            // ULONGLONG
+    {0x360, "QpcSystemTimeIncrementShift"},          // UCHAR
+    {0x361, "QpcInterruptTimeIncrementShift"},       // UCHAR
+    {0x362, "UnparkedProcessorCount"},               // USHORT
+    {0x364, "EnclaveFeatureMask[4]"},                // ULONG[4]
+    {0x374, "TelemetryCoverageRound"},               // ULONG
+    {0x378, "UserModeGlobalLogger[16]"},             // USHORT[16]
+    {0x398, "ImageFileExecutionOptions"},            // ULONG
+    {0x39C, "LangGenerationCount"},                  // ULONG
+    {0x3A0, "Reserved4"},                            // ULONGLONG
+    {0x3A8, "InterruptTimeBias"},                    // ULONGLONG
+    {0x3B0, "QpcBias"},                              // ULONGLONG
+    {0x3B8, "ActiveProcessorCount"},                 // ULONG
+    {0x3BC, "ActiveGroupCount"},                     // UCHAR
+    {0x3BD, "Reserved9"},                            // UCHAR
+    {0x3BE, "QpcData"},                              // USHORT (union)
+    {0x3C0, "TimeZoneBiasEffectiveStart"},           // LARGE_INTEGER
+    {0x3C8, "TimeZoneBiasEffectiveEnd"},             // LARGE_INTEGER
+    {0x3D0, "XState"},                               // XSTATE_CONFIGURATION (size varies)
+    {0x410, "FeatureConfigurationChangeStamp"},      // KSYSTEM_TIME
+    {0x418, "Spare"},                                // ULONG
+    {0x420, "UserPointerAuthMask"},                  // ULONG64
+    {0x428, "XStateArm64"},                          // XSTATE_CONFIGURATION
+    {0x468, "Reserved10[210]"},                      // ULONG[210]
+};
+
+
+static const std::map<uint64_t, std::string> teb_offsets = {
+    {0x000, "NtTib.ExceptionList"},              // _NT_TIB
+    {0x008, "NtTib.StackBase"},
+    {0x010, "NtTib.StackLimit"},
+    {0x018, "NtTib.SubSystemTib"},
+    {0x020, "NtTib.FiberData / Version"},
+    {0x028, "NtTib.ArbitraryUserPointer"},
+    {0x030, "NtTib.Self"},
+    {0x038, "EnvironmentPointer"},               // Reserved1[0]
+    {0x040, "ClientId (ProcessId, ThreadId)"},
+    {0x050, "ActiveRpcHandle"},
+    {0x058, "ThreadLocalStoragePointer"},
+    {0x060, "ProcessEnvironmentBlock (PEB*)"},
+    {0x068, "LastErrorValue"},
+    {0x070, "CountOfOwnedCriticalSections"},
+    {0x078, "CsrClientThread"},
+    {0x080, "Win32ThreadInfo"},
+    {0x088, "User32Reserved[26]"},
+    {0x0F0, "UserReserved[5]"},
+    {0x108, "WOW32Reserved"},
+    {0x110, "CurrentLocale"},
+    {0x118, "FpSoftwareStatusRegister"},
+    {0x120, "SystemReserved1[54]"},
+    {0x300, "ExceptionCode"},
+    {0x308, "ActivationContextStackPointer"},
+    {0x310, "SpareBytes1[24]"},
+    {0x328, "GdiTebBatch"},
+    {0x4E0, "RealClientId"},
+    {0x4F0, "GdiCachedProcessHandle"},
+    {0x4F8, "GdiClientPID"},
+    {0x500, "GdiClientTID"},
+    {0x508, "GdiThreadLocalInfo"},
+    {0x510, "Win32ClientInfo[62]"},
+    {0x608, "glDispatchTable[233]"},
+    {0x9F0, "glReserved1[29]"},
+    {0xA68, "glReserved2"},
+    {0xA70, "glSectionInfo"},
+    {0xA78, "glSection"},
+    {0xA80, "glTable"},
+    {0xA88, "glCurrentRC"},
+    {0xA90, "glContext"},
+    {0xA98, "LastStatusValue"},
+    {0xAA0, "StaticUnicodeString"},
+    {0xAB0, "StaticUnicodeBuffer[261]"},
+    {0xCD8, "DeallocationStack"},
+    {0xCE0, "TlsSlots[64]"},                    // 8*64 = 512 bytes
+    {0xEE0, "TlsLinks"},
+    {0xEF0, "Vdm"},                             // Reserved5[0]
+    {0xEF8, "ReservedForNtRpc"},
+    {0xF00, "DbgSsReserved[2]"},
+    {0xF10, "HardErrorMode"},
+    {0xF18, "Instrumentation[11]"},
+    {0xF70, "ActivityId"},
+    {0xF80, "SubProcessTag"},
+    {0xF88, "EtwLocalData"},
+    {0xF90, "EtwTraceData"},
+    {0xF98, "WinSockData"},
+    {0xFA0, "GdiBatchCount"},
+    {0xFA4, "CurrentIdealProcessor"},
+    {0xFA8, "GuaranteedStackBytes"},
+    {0xFB0, "ReservedForPerf"},
+    {0xFB8, "ReservedForOle"},
+    {0xFC0, "WaitingOnLoaderLock"},
+    {0xFC8, "SavedPriorityState"},
+    {0xFD0, "ReservedForCodeCoverage"},
+    {0xFD8, "ThreadPoolData"},
+    {0xFE0, "TlsExpansionSlots"},
+    {0xFE8, "MuiGeneration"},
+    {0xFEC, "IsImpersonating"},
+    {0xFF0, "NlsCache"},
+    {0xFF8, "pShimData"},
+    {0x1000, "HeapVirtualAffinity"},
+    {0x1008, "CurrentTransactionHandle"},
+    {0x1010, "ActiveFrame"},
+    {0x1018, "FlsData"},
+    {0x1020, "PreferredLanguages"},
+    {0x1028, "UserPrefLanguages"},
+    {0x1030, "MergedPrefLanguages"},
+    {0x1038, "MuiImpersonation"},
+    {0x1040, "CrossTebFlags"},
+    {0x1044, "SameTebFlags"},
+    {0x1048, "TxnScopeEnterCallback"},
+    {0x1050, "TxnScopeExitCallback"},
+    {0x1058, "TxnScopeContext"},
+    {0x1060, "LockCount"},
+    {0x1064, "SpareUlong0"},
+    {0x1068, "ResourceRetValue"},
+};
+
+
+
+static const std::map<uint64_t, std::string> peb_offsets = {
+    {0x000, "Reserved1[0]"},                      // BYTE[2]
+    {0x002, "BeingDebugged"},                     // BYTE
+    {0x003, "Reserved2[0]"},                      // BYTE
+    {0x008, "Reserved3[0]"},                      // PVOID
+    {0x010, "Reserved3[1]"},
+    {0x018, "Ldr (PEB_LDR_DATA*)"},
+    {0x020, "ProcessParameters (RTL_USER_PROCESS_PARAMETERS*)"},
+    {0x028, "Reserved4[0]"},
+    {0x030, "Reserved4[1]"},
+    {0x038, "Reserved4[2]"},
+    {0x040, "AtlThunkSListPtr"},
+    {0x048, "Reserved5"},
+    {0x050, "Reserved6"},
+    {0x058, "Reserved7"},
+    {0x060, "Reserved8"},
+    {0x064, "AtlThunkSListPtr32"},
+    {0x068, "Reserved9[0]"},                      // 45 pointers
+    // Skipping actual 45*8 = 0x168 bytes
+    {0x1D0, "PostProcessInitRoutine"},
+    {0x1D8, "Reserved11[0]"},                     // 128 bytes
+    {0x258, "Reserved12[0]"},
+    {0x260, "SessionId"},
+};
+
+
+enum ConsoleColor {
+    BLACK = 0,
+    RED = 4,
+    GREEN = 2,
+    YELLOW = 6,
+    BLUE = 1,
+    MAGENTA = 5,
+    CYAN = 3,
+    WHITE = 7,
+    BRIGHT_WHITE = 15
+};
+
+
+inline void SetConsoleColor(ConsoleColor color) {
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    SetConsoleTextAttribute(hConsole, static_cast<WORD>(color));
+}
+
+
+#define LOG_analyze(color, x)                        \
+    do {                                     \
+        SetConsoleColor(color);              \
+        std::wcout << x << std::endl;        \
+        SetConsoleColor(WHITE);              \
+    } while(0)
+#else
+#define LOG_analyze(color, x)
+#endif
 // ----------------------- Break point helper ------------------
 
 
@@ -197,7 +555,7 @@ public:
     // ------------------- CPU Context -------------------
     HANDLE hThread;
     //test with real cpu 
-#define DB_ENABLED 1
+#define DB_ENABLED 0
 #if DB_ENABLED
     memory_mange my_mange;
     bool is_cpuid;
@@ -375,6 +733,8 @@ public:
                 is_cpuid = 0;
                 my_mange.is_write = 0;
 #endif
+
+
                 const ZydisDisassembledInstruction* op = disasm.GetInstr();
                 instr = op->info;
 
@@ -394,6 +754,7 @@ public:
                     LOG(L"[~] VEX prefix detected.");
                 if (instr.mnemonic == ZYDIS_MNEMONIC_SYSCALL )
                 {
+                    LOG_analyze( BLUE ,"[+] syscall in : " << g_regs.rip << " rax : " << g_regs.rax.q);
                     LOG("[+] syscall in : " << g_regs.rip << " rax : " << g_regs.rax.q);
                     return g_regs.rip + instr.length;
                 }
@@ -454,6 +815,9 @@ public:
                     instr.mnemonic == ZYDIS_MNEMONIC_RET)
                 {
                     if (!IsInEmulationRange(address)) {
+#if analyze_ENABLED
+                        LOG_analyze( CYAN ,  GetExportedFunctionNameByAddress(address).c_str());
+#endif
                         uint64_t value = 0;
                         ReadMemory(g_regs.rsp.q, &value, 8);
                         return value;
@@ -535,6 +899,8 @@ public:
         for (int i = 0; i < 16; i++) {
             memcpy(g_regs.ymm[i].xmm, (&ctx.Xmm0) + i, 16);
         }
+        SIZE_T read_peb;
+        ReadProcessMemory(pi.hProcess, (LPCVOID)(g_regs.gs_base + 0x60), &peb_address, sizeof(peb_address), &read_peb) && read_peb == sizeof(peb_address);
         reg_lookup = {
             // RAX family
             { ZYDIS_REGISTER_AL,  &g_regs.rax.l },
@@ -777,6 +1143,77 @@ private:
 
     // ------------------- Memory Access Helpers -------------------
     bool ReadMemory(uint64_t address, void* buffer, SIZE_T size) {
+
+#if analyze_ENABLED
+        const uint64_t kuser_base = 0x00000007FFE0000;
+        const uint64_t kuser_size = 0x1000;
+
+        // KUSER_SHARED_DATA
+        if (address >= kuser_base && address < kuser_base + kuser_size) {
+            uint64_t offset = address - kuser_base;
+            std::string description = "Unknown";
+
+            auto it = kuser_shared_data_offsets.upper_bound(offset);
+            if (it != kuser_shared_data_offsets.begin()) {
+                --it;
+                uint64_t base_offset = it->first;
+                uint64_t delta = offset - base_offset;
+                if (delta == 0)
+                    description = it->second;
+                else
+                    description = it->second + " + 0x" + std::to_string(delta);
+            }
+
+           LOG_analyze(YELLOW,
+                "[KUSER_SHARED_DATA] Reading ("<< description.c_str() <<") at 0x"<<std::hex <<address <<" [RIP: 0x"<<std::hex << g_regs.rip<<"]");
+        }
+
+        // TEB
+        if (address >= g_regs.gs_base && address < g_regs.gs_base + 0x1000) {
+            uint64_t offset = address - g_regs.gs_base;
+            std::string description = "Unknown";
+
+            auto it = teb_offsets.upper_bound(offset);
+            if (it != teb_offsets.begin()) {
+                --it;
+                uint64_t base_offset = it->first;
+                uint64_t delta = offset - base_offset;
+                if (delta == 0)
+                    description = it->second;
+                else
+                    description = it->second + " + 0x" + std::to_string(delta);
+            }
+
+            LOG_analyze(MAGENTA,
+                "[TEB] Reading ("<< description.c_str()  <<") at 0x" << std::hex << address << " [RIP: 0x" << std::hex << g_regs.rip << "]");
+        }
+
+        // PEB
+
+
+        if (peb_address) {
+            if (address >= peb_address && address < peb_address + 0x1000) {
+                uint64_t offset = address - peb_address;
+                std::string description = "Unknown";
+
+                auto it = peb_offsets.upper_bound(offset);
+                if (it != peb_offsets.begin()) {
+                    --it;
+                    uint64_t base_offset = it->first;
+                    uint64_t delta = offset - base_offset;
+                    if (delta == 0)
+                        description = it->second;
+                    else
+                        description = it->second + " + 0x" + std::to_string(delta);
+                }
+
+                LOG_analyze(CYAN,
+                    "[PEB] Reading (%s) at 0x%llx [RIP: 0x%llx]",
+                    description.c_str(), address, g_regs.rip);
+            }
+        }
+#endif
+
         SIZE_T bytesRead;
         return ReadProcessMemory(pi.hProcess, (LPCVOID)address, buffer, size, &bytesRead) && bytesRead == size;
     }
@@ -3891,6 +4328,9 @@ private:
     void emulate_cpuid(const ZydisDisassembledInstruction*) {
 #if DB_ENABLED
         is_cpuid = 1;
+#endif
+#if analyze_ENABLED
+        LOG_analyze(WHITE, "CPUID  at : 0x"<< std::hex <<g_regs.rip);
 #endif
         int cpu_info[4];
         int input_eax = static_cast<int>(g_regs.rax.q);
