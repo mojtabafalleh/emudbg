@@ -48,7 +48,7 @@ std::vector<std::pair<uint64_t, uint64_t>> valid_ranges;
 PROCESS_INFORMATION pi;
 IMAGE_OPTIONAL_HEADER64 optionalHeader;
 
-#define analyze_ENABLED 1
+#define analyze_ENABLED 0
 #if analyze_ENABLED
 #include <psapi.h>
 uint64_t peb_address = 0;
@@ -899,8 +899,10 @@ public:
         for (int i = 0; i < 16; i++) {
             memcpy(g_regs.ymm[i].xmm, (&ctx.Xmm0) + i, 16);
         }
+#if analyze_ENABLED
         SIZE_T read_peb;
         ReadProcessMemory(pi.hProcess, (LPCVOID)(g_regs.gs_base + 0x60), &peb_address, sizeof(peb_address), &read_peb) && read_peb == sizeof(peb_address);
+#endif
         reg_lookup = {
             // RAX family
             { ZYDIS_REGISTER_AL,  &g_regs.rax.l },
