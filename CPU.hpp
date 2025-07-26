@@ -12,7 +12,16 @@
 #include "deps/zydis_wrapper.h"
 #include <tlhelp32.h>
 
-#define LOG_ENABLED 0
+//------------------------------------------
+//LOG analyze 
+#define analyze_ENABLED 0
+//LOG everything
+#define LOG_ENABLED 1
+//test with real cpu
+#define DB_ENABLED 0
+//------------------------------------------
+
+
 #if LOG_ENABLED
 #define LOG(x) std::wcout << x << std::endl
 #else
@@ -48,7 +57,7 @@ std::vector<std::pair<uint64_t, uint64_t>> valid_ranges;
 PROCESS_INFORMATION pi;
 IMAGE_OPTIONAL_HEADER64 optionalHeader;
 
-#define analyze_ENABLED 1
+
 #if analyze_ENABLED
 #include <psapi.h>
 struct ExportedFunctionInfo {
@@ -554,7 +563,7 @@ public:
     // ------------------- CPU Context -------------------
     HANDLE hThread;
     //test with real cpu 
-#define DB_ENABLED 0
+
 #if DB_ENABLED
     memory_mange my_mange;
     bool is_cpuid;
@@ -675,7 +684,8 @@ public:
             { ZYDIS_MNEMONIC_CMOVO, &CPU::emulate_cmovo },
             { ZYDIS_MNEMONIC_BSWAP, &CPU::emulate_bswap },
             { ZYDIS_MNEMONIC_CMOVP, &CPU::emulate_cmovp },
-            
+            { ZYDIS_MNEMONIC_CMOVNP, &CPU::emulate_cmovnp },
+            { ZYDIS_MNEMONIC_JNP, &CPU::emulate_jnp },
             
         };
 
@@ -2926,9 +2936,10 @@ private:
         bool msb_minus_1 = (val >> (width - 2)) & 1;
 
         g_regs.rflags.flags.SF = msb_minus_1;
+
         g_regs.rflags.flags.OF = msb ^ msb_minus_1;
         g_regs.rflags.flags.ZF = (zero_extend(val, width) == 0);
-        g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(val & 0xFF));
+
 
         LOG(L"[+] RCR => 0x" << std::hex << val);
     }
@@ -2986,9 +2997,9 @@ private:
         bool msb_minus_1 = (val >> (width - 2)) & 1;
 
         g_regs.rflags.flags.SF = msb;
-        if (count == 1) {
-            g_regs.rflags.flags.OF = msb ^ old_CF;
-        }
+        LOG(count);
+        if (count > 1)
+        g_regs.rflags.flags.OF = !(msb | msb_minus_1);
 
 
         LOG(L"[+] RCL => 0x" << std::hex << val);
@@ -3052,6 +3063,30 @@ private:
         }
 
         LOG(L"[+] CMOVNB executed: moved 0x" << std::hex << value << L" to "
+            << ZydisRegisterGetString(dst.reg.value));
+    }
+    void emulate_cmovnp(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+
+
+        if (g_regs.rflags.flags.PF) {
+            LOG(L"[+] CMOVNP skipped (PF=1)");
+            return;
+        }
+
+        uint64_t value = 0;
+        if (!read_operand_value(src, instr->info.operand_width, value)) {
+            LOG(L"[!] Failed to read source operand for CMOVNP");
+            return;
+        }
+
+        if (!write_operand_value(dst, instr->info.operand_width, value)) {
+            LOG(L"[!] Failed to write destination operand for CMOVNP");
+            return;
+        }
+
+        LOG(L"[+] CMOVNP executed: moved 0x" << std::hex << value << L" to "
             << ZydisRegisterGetString(dst.reg.value));
     }
 
@@ -3224,6 +3259,27 @@ private:
         }
 
         LOG(L"[+] JZ to => 0x" << std::hex << g_regs.rip);
+    }
+    void emulate_jnp(const ZydisDisassembledInstruction* instr) {
+        const auto& op = instr->operands[0];
+        uint64_t target = 0;
+
+        if (!read_operand_value(op, instr->info.operand_width, target)) {
+            LOG(L"[!] Unsupported operand type for JNP");
+            g_regs.rip += instr->info.length;
+            return;
+        }
+
+        if (!g_regs.rflags.flags.PF) {
+
+            g_regs.rip = target;
+        }
+        else {
+
+            g_regs.rip += instr->info.length;
+        }
+
+        LOG(L"[+] JNP to => 0x" << std::hex << g_regs.rip);
     }
 
 
@@ -3398,16 +3454,31 @@ private:
 
 
         uint64_t result = (dst_val >> count) | (src_val << (width - count));
-
-        bool msb_before = (dst_val >> (width - 1)) & 1;
-        bool msb_after = (result >> (width - 1)) & 1;
+        result &= (width == 64) ? ~0ULL : ((1ULL << width) - 1);  // Mask to operand width
 
         g_regs.rflags.flags.CF = (dst_val >> (count - 1)) & 1;
-        g_regs.rflags.flags.OF = msb_before ^ msb_after;
 
-        g_regs.rflags.flags.SF = msb_after;
+        LOG(count);  
+        bool msb = (result >> (width - 1)) & 1;
+            bool msb_minus_1 = (result >> (width - 2)) & 1;
+            LOG(msb);
+            LOG(msb_minus_1);
+
+        if (count < 5) {
+            g_regs.rflags.flags.OF = msb | msb_minus_1;
+        }
+
+
+
+        
+
+
+
+
+        g_regs.rflags.flags.SF = (result >> (width - 1)) & 1;
         g_regs.rflags.flags.ZF = (result == 0);
-        g_regs.rflags.flags.PF = parity(static_cast<uint8_t>(result & 0xFF));
+        g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result & 0xFF));
+
 
         if (!write_operand_value(dst, instr->info.operand_width, result)) {
             LOG(L"[!] Failed to write SHRD result");
@@ -3827,12 +3898,16 @@ private:
         bool msb_after = (result >> (width - 1)) & 1;
 
         g_regs.rflags.flags.CF = (dst_val >> (width - count)) & 1;
-        g_regs.rflags.flags.OF = msb_before ^ msb_after;
+        LOG(count);
+        LOG(msb_after);
+        LOG(msb_before);
+        if (count <= 0xa)
+        g_regs.rflags.flags.OF = msb_before | msb_after;
 
         g_regs.rflags.flags.SF = msb_after;
         g_regs.rflags.flags.ZF = (result == 0);
         g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result & 0xFF));
-
+        g_regs.rflags.flags.AF = 0;
         if (!write_operand_value(dst, instr->info.operand_width, result)) {
             LOG(L"[!] Failed to write SHLD result");
             return;
@@ -4326,6 +4401,7 @@ private:
 
         // Update Flags
         g_regs.rflags.flags.CF = cf;
+        g_regs.rflags.flags.AF = 0;
         g_regs.rflags.flags.OF = 0; // SAR always clears OF
         g_regs.rflags.flags.SF = ((result >> (width - 1)) & 1);
         g_regs.rflags.flags.ZF = (result == 0);
@@ -4476,7 +4552,7 @@ private:
     void emulate_movd(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
         const auto& src = instr->operands[1];
-        uint32_t width = 32;
+        const uint32_t width = 32;
 
         if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
             // movd xmm, [mem]
@@ -4486,33 +4562,15 @@ private:
                 return;
             }
 
-            __m128 xmm_val = _mm_setzero_ps();
-            memcpy(&xmm_val, &mem_val, 4);
+            __m128 xmm_val = _mm_setzero_ps();       // Clear entire xmm
+            memcpy(&xmm_val, &mem_val, 4);           // Copy into low 4 bytes
 
             if (!write_operand_value<__m128>(dst, 128, xmm_val)) {
-                LOG(L"[!] Failed to write new value to XMM register");
+                LOG(L"[!] Failed to write to XMM register");
                 return;
             }
 
             LOG(L"[+] MOVD xmm, [mem] executed");
-        }
-        else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            // movd xmm, r32
-            uint32_t reg_val = 0;
-            if (!read_operand_value(src, width, reg_val)) {
-                LOG(L"[!] Failed to read 32-bit value from GP register in MOVD");
-                return;
-            }
-
-            __m128 xmm_val = _mm_setzero_ps();
-            memcpy(&xmm_val, &reg_val, 4);
-
-            if (!write_operand_value<__m128>(dst, 128, xmm_val)) {
-                LOG(L"[!] Failed to write value to XMM register");
-                return;
-            }
-
-            LOG(L"[+] MOVD xmm, r32 executed");
         }
         else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
             // movd [mem], xmm
@@ -4523,37 +4581,72 @@ private:
             }
 
             uint32_t val32 = 0;
-            memcpy(&val32, &xmm_val, 4);
+            memcpy(&val32, &xmm_val, 4);  // Lower 32 bits
 
             if (!write_operand_value(dst, width, val32)) {
-                LOG(L"[!] Failed to write 32-bit value to memory in MOVD");
+                LOG(L"[!] Failed to write to memory in MOVD");
                 return;
             }
 
             LOG(L"[+] MOVD [mem], xmm executed");
         }
         else if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER && src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            // movd r32, xmm
-            __m128 xmm_val;
-            if (!read_operand_value<__m128>(src, 128, xmm_val)) {
-                LOG(L"[!] Failed to read XMM register value in MOVD");
-                return;
+            auto dst_class = ZydisRegisterGetClass(dst.reg.value);
+            auto src_class = ZydisRegisterGetClass(src.reg.value);
+
+            bool dst_is_gpr32 = dst_class == ZYDIS_REGCLASS_GPR32;
+            bool src_is_gpr32 = src_class == ZYDIS_REGCLASS_GPR32;
+            bool dst_is_xmm = dst_class == ZYDIS_REGCLASS_XMM;
+            bool src_is_xmm = src_class == ZYDIS_REGCLASS_XMM;
+
+            if (dst_is_xmm && src_is_gpr32) {
+                // movd xmm, r32
+                uint32_t reg_val = 0;
+                if (!read_operand_value(src, width, reg_val)) {
+                    LOG(L"[!] Failed to read GPR32 value");
+                    return;
+                }
+
+                __m128 xmm_val = _mm_setzero_ps();
+                memcpy(&xmm_val, &reg_val, 4);
+
+                if (!write_operand_value<__m128>(dst, 128, xmm_val)) {
+                    LOG(L"[!] Failed to write to XMM register");
+                    return;
+                }
+
+                LOG(L"[+] MOVD xmm, r32 executed");
             }
+            else if (dst_is_gpr32 && src_is_xmm) {
+                // movd r32, xmm
+                __m128 xmm_val;
+                if (!read_operand_value<__m128>(src, 128, xmm_val)) {
+                    LOG(L"[!] Failed to read XMM register");
+                    return;
+                }
 
-            uint32_t val32 = 0;
-            memcpy(&val32, &xmm_val, 4);
+                uint32_t val32 = 0;
+                memcpy(&val32, &xmm_val, 4);
 
-            if (!write_operand_value(dst, width, val32)) {
-                LOG(L"[!] Failed to write 32-bit value to GP register in MOVD");
-                return;
+                uint64_t val64 = static_cast<uint64_t>(val32); // Zero-extend to 64-bit
+
+                // Must write full 64-bit to ensure upper bits are cleared
+                if (!write_operand_value(dst, 64, val64)) {
+                    LOG(L"[!] Failed to write zero-extended value to GPR");
+                    return;
+                }
+
+                LOG(L"[+] MOVD r32, xmm executed");
             }
-
-            LOG(L"[+] MOVD r32, xmm executed");
+            else {
+                LOG(L"[!] Unsupported MOVD register-register combination");
+            }
         }
         else {
             LOG(L"[!] Unsupported MOVD operand combination");
         }
     }
+
 
     void emulate_movlhps(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
@@ -4655,17 +4748,33 @@ private:
             LOG(L"[!] Failed to read shift operand");
             return;
         }
-        uint8_t shift = static_cast<uint8_t>(tmp_shift);
+        uint8_t shift = static_cast<uint8_t>(tmp_shift) & 0x1F;
 
-        shift &= (width - 1);
+        if (shift == 0) {
+            LOG(L"[+] ROL => no operation");
+            return;
+        }
 
+        // save original MSB and MSB-1 for OF computation
+        bool orig_msb = (val >> (width - 1)) & 1;
+        bool orig_msb_minus_1 = (val >> (width - 2)) & 1;
 
-        val = (val << shift) | (val >> (width - shift));
-        val &= (width == 64) ? ~0ULL : ((1ULL << width) - 1);
+        val = ((val << shift) | (val >> (width - shift))) & ((width == 64) ? ~0ULL : ((1ULL << width) - 1));
 
         if (!write_operand_value(dst, width, val)) {
             LOG(L"[!] Failed to write result operand");
             return;
+        }
+
+        // === Set Flags ===
+        // CF = lowest bit that was rotated out (bit at position (width - shift))
+        g_regs.rflags.flags.CF = (val >> (0)) & 1;
+
+        // OF only defined if shift == 1
+        if (shift == 1) {
+            bool new_msb = (val >> (width - 1)) & 1;
+            bool new_msb_minus_1 = (val >> (width - 2)) & 1;
+            g_regs.rflags.flags.OF = new_msb ^ new_msb_minus_1;
         }
 
         LOG(L"[+] ROL => 0x" << std::hex << val);
@@ -4786,10 +4895,10 @@ private:
         if (shift == 1) {
             bool msb = (result >> (width - 1)) & 1;
             bool next_msb = (result >> (width - 2)) & 1;
-            g_regs.rflags.flags.OF = msb ^ next_msb;
+            g_regs.rflags.flags.OF = msb | next_msb;
         }
         else {
-            !g_regs.rflags.flags.OF;
+          //  !g_regs.rflags.flags.OF;
         }
 
         LOG("CF : " << g_regs.rflags.flags.CF);
