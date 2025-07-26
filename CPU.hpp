@@ -686,6 +686,10 @@ public:
             { ZYDIS_MNEMONIC_CMOVP, &CPU::emulate_cmovp },
             { ZYDIS_MNEMONIC_CMOVNP, &CPU::emulate_cmovnp },
             { ZYDIS_MNEMONIC_JNP, &CPU::emulate_jnp },
+            { ZYDIS_MNEMONIC_SETNS, &CPU::emulate_setns },
+            { ZYDIS_MNEMONIC_CMOVNO, &CPU::emulate_cmovno },
+            { ZYDIS_MNEMONIC_JP, &CPU::emulate_jp },
+            { ZYDIS_MNEMONIC_CMOVLE, &CPU::emulate_cmovle },
             
         };
 
@@ -3089,6 +3093,56 @@ private:
         LOG(L"[+] CMOVNP executed: moved 0x" << std::hex << value << L" to "
             << ZydisRegisterGetString(dst.reg.value));
     }
+    void emulate_cmovno(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+
+        if (g_regs.rflags.flags.OF) {
+            LOG(L"[+] CMOVNO skipped (OF=1)");
+            return;
+        }
+
+        uint64_t value = 0;
+        if (!read_operand_value(src, instr->info.operand_width, value)) {
+            LOG(L"[!] Failed to read source operand for CMOVNO");
+            return;
+        }
+
+        if (!write_operand_value(dst, instr->info.operand_width, value)) {
+            LOG(L"[!] Failed to write destination operand for CMOVNO");
+            return;
+        }
+
+        LOG(L"[+] CMOVNO executed: moved 0x" << std::hex << value << L" to "
+            << ZydisRegisterGetString(dst.reg.value));
+    }
+    void emulate_cmovle(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+
+        bool ZF = g_regs.rflags.flags.ZF;
+        bool SF = g_regs.rflags.flags.SF;
+        bool OF = g_regs.rflags.flags.OF;
+
+        if (!(ZF || (SF != OF))) {
+            LOG(L"[+] CMOVLE skipped (ZF=0 and SF==OF)");
+            return;
+        }
+
+        uint64_t value = 0;
+        if (!read_operand_value(src, instr->info.operand_width, value)) {
+            LOG(L"[!] Failed to read source operand for CMOVLE");
+            return;
+        }
+
+        if (!write_operand_value(dst, instr->info.operand_width, value)) {
+            LOG(L"[!] Failed to write destination operand for CMOVLE");
+            return;
+        }
+
+        LOG(L"[+] CMOVLE executed: moved 0x" << std::hex << value << L" to "
+            << ZydisRegisterGetString(dst.reg.value));
+    }
 
 
     void emulate_cmovz(const ZydisDisassembledInstruction* instr) {
@@ -3271,6 +3325,27 @@ private:
         }
 
         if (!g_regs.rflags.flags.PF) {
+
+            g_regs.rip = target;
+        }
+        else {
+
+            g_regs.rip += instr->info.length;
+        }
+
+        LOG(L"[+] JNP to => 0x" << std::hex << g_regs.rip);
+    }
+    void emulate_jp(const ZydisDisassembledInstruction* instr) {
+        const auto& op = instr->operands[0];
+        uint64_t target = 0;
+
+        if (!read_operand_value(op, instr->info.operand_width, target)) {
+            LOG(L"[!] Unsupported operand type for JNP");
+            g_regs.rip += instr->info.length;
+            return;
+        }
+
+        if (g_regs.rflags.flags.PF) {
 
             g_regs.rip = target;
         }
@@ -5076,6 +5151,14 @@ private:
         LOG(L"[+] BSR: Found highest set bit index = " << index << L", ZF=0");
     }
 
+    void emulate_setns(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        uint8_t value = !g_regs.rflags.flags.SF;
+
+        set_register_value<uint8_t>(dst.reg.value, value);
+
+        LOG(L"[+] SETNS => " << std::hex << static_cast<int>(value));
+    }
 
     void emulate_setnz(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
