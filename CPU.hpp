@@ -1667,12 +1667,11 @@ private:
         }
         LOG(L"[+] vzeroupper executed: upper 128 bits of all ymm registers zeroed.");
     }
-
     void emulate_mul(const ZydisDisassembledInstruction* instr) {
         const auto& operands = instr->operands;
         int operand_count = instr->info.operand_count_visible;
         int width = instr->info.operand_width;
- 
+
         if (operand_count != 1) {
             LOG(L"[!] Unsupported MUL operand count: " << operand_count);
             return;
@@ -1695,13 +1694,15 @@ private:
             return;
         }
 
-        // Apply masks to restrict to correct width
         uint64_t mask = get_mask_for_width(width);
         val1 &= mask;
         val2 &= mask;
 
-        // Perform 64x64 to 128 bit multiplication
         uint128_t result = mul_64x64_to_128(val1, val2);
+
+        // Clear RDX and RAX fully before writing
+        g_regs.rax.q = 0;
+        g_regs.rdx.q = 0;
 
         // Store result in RAX and RDX
         switch (width) {
@@ -1797,6 +1798,8 @@ private:
         uint128_t result128 = { 0, 0 };
         int64_t result64 = 0;
 
+        g_regs.rax.q = 0;
+        g_regs.rdx.q = 0;
         if (operand_count == 1) {
             val1 = read_signed_operand(ops[0], width);
             // val2 = RAX (implicit)
