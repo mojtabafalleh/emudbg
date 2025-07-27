@@ -14,11 +14,11 @@
 
 //------------------------------------------
 //LOG analyze 
-#define analyze_ENABLED 0
+#define analyze_ENABLED 1
 //LOG everything
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 //test with real cpu
-#define DB_ENABLED 1
+#define DB_ENABLED 0
 //------------------------------------------
 
 
@@ -51,6 +51,7 @@ enum class ThreadState {
     Blocked,
 };
 extern "C" uint64_t __cdecl xgetbv_asm(uint32_t ecx);
+
 
 bool breakpoint_hit;
 std::vector<std::pair<uint64_t, uint64_t>> valid_ranges;
@@ -1149,6 +1150,18 @@ private:
 
         return { quotient, remainder };
     }
+    constexpr uint64_t get_mask_for_width(int width) {
+        switch (width) {
+        case 8:  return 0xFFull;
+        case 16: return 0xFFFFull;
+        case 32: return 0xFFFFFFFFull;
+        case 64: return 0xFFFFFFFFFFFFFFFFull;
+        default:
+            assert(false && "Invalid operand width for get_mask_for_width");
+            return 0;
+        }
+    }
+
 
     uint128_t mul_64x64_to_128(uint64_t a, uint64_t b) {
         uint128_t result;
@@ -1659,7 +1672,7 @@ private:
         const auto& operands = instr->operands;
         int operand_count = instr->info.operand_count_visible;
         int width = instr->info.operand_width;
-
+ 
         if (operand_count != 1) {
             LOG(L"[!] Unsupported MUL operand count: " << operand_count);
             return;
@@ -1682,28 +1695,15 @@ private:
             return;
         }
 
-        // Mask both operands to correct width before multiplication
-        switch (width) {
-        case 8:
-            val1 &= 0xFF;
-            val2 &= 0xFF;
-            break;
-        case 16:
-            val1 &= 0xFFFF;
-            val2 &= 0xFFFF;
-            break;
-        case 32:
-            val1 &= 0xFFFFFFFF;
-            val2 &= 0xFFFFFFFF;
-            break;
-        case 64:
-            // No mask needed
-            break;
-        }
+        // Apply masks to restrict to correct width
+        uint64_t mask = get_mask_for_width(width);
+        val1 &= mask;
+        val2 &= mask;
 
-        // MUL is unsigned multiplication: result width = twice operand width
+        // Perform 64x64 to 128 bit multiplication
         uint128_t result = mul_64x64_to_128(val1, val2);
 
+        // Store result in RAX and RDX
         switch (width) {
         case 8:
             g_regs.rax.l = static_cast<uint8_t>(result.low & 0xFF);
@@ -1716,8 +1716,8 @@ private:
             break;
 
         case 32:
-            g_regs.rax.d = static_cast<uint32_t>(result.low & 0xFFFFFFFF);
-            g_regs.rdx.d = static_cast<uint32_t>((result.low >> 32) & 0xFFFFFFFF);
+            g_regs.rax.d = static_cast<uint32_t>(result.low);
+            g_regs.rdx.d = static_cast<uint32_t>(result.high);
             break;
 
         case 64:
@@ -1729,21 +1729,13 @@ private:
         LOG(L"[+] MUL (" << width << L"bit) => RDX:RAX = 0x"
             << std::hex << result.high << L":" << result.low);
 
-        // Update CF and OF: set if upper half is not zero
+        // Update CF and OF based on upper half of result
         bool upper_nonzero = false;
         switch (width) {
-        case 8:
-            upper_nonzero = (g_regs.rax.h != 0);
-            break;
-        case 16:
-            upper_nonzero = (g_regs.rdx.w != 0);
-            break;
-        case 32:
-            upper_nonzero = (g_regs.rdx.d != 0);
-            break;
-        case 64:
-            upper_nonzero = (g_regs.rdx.q != 0);
-            break;
+        case 8:  upper_nonzero = (g_regs.rax.h != 0); break;
+        case 16: upper_nonzero = (g_regs.rdx.w != 0); break;
+        case 32: upper_nonzero = (g_regs.rdx.d != 0); break;
+        case 64: upper_nonzero = (g_regs.rdx.q != 0); break;
         }
 
         g_regs.rflags.flags.CF = upper_nonzero;
@@ -1751,6 +1743,7 @@ private:
         g_regs.rflags.flags.PF = (parity(result.high) == parity(result.low));
         g_regs.rflags.flags.ZF = 0;
         g_regs.rflags.flags.AF = 0;
+
         switch (width) {
         case 8:
             g_regs.rflags.flags.SF = (g_regs.rax.l & 0x80) != 0;
@@ -1765,7 +1758,6 @@ private:
             g_regs.rflags.flags.SF = (g_regs.rax.q & 0x8000000000000000) != 0;
             break;
         }
-        // ZF, SF, PF are undefined after MUL, no update needed
     }
 
     void emulate_scasd(const ZydisDisassembledInstruction* instr) {
@@ -2963,14 +2955,17 @@ private:
 
         LOG(L"[+] RCR => 0x" << std::hex << val);
     }
-
     void emulate_rcl(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
         const auto& src = instr->operands[1];
         uint8_t width = instr->info.operand_width;
 
+        uint64_t actual_val = get_register_value<uint64_t>(dst.reg.value);
+        uint32_t val32 = static_cast<uint32_t>(actual_val & 0xFFFFFFFF);
+        bool actual_sf = (val32 >> (width - 1)) & 1;
+
         uint64_t val = 0;
-        if (!read_operand_value(dst, instr->info.operand_width, val)) {
+        if (!read_operand_value(dst, width, val)) {
             LOG(L"[!] Failed to read RCL destination operand");
             return;
         }
@@ -2987,7 +2982,7 @@ private:
             return;
         }
 
-        count &= 0x1F;
+        count %= (width + 1);
 
         if (count == 0) {
             LOG(L"[+] RCL => no operation");
@@ -2998,31 +2993,29 @@ private:
 
         for (int i = 0; i < count; ++i) {
             bool new_CF = (val >> (width - 1)) & 1;
-            val <<= 1;
-            if (old_CF)
-                val |= 1;
-            else
-                val &= ~1ULL;
+            val = ((val << 1) & ((1ULL << width) - 1)) | (old_CF ? 1 : 0);
             old_CF = new_CF;
         }
 
         g_regs.rflags.flags.CF = old_CF;
 
-        if (!write_operand_value(dst, instr->info.operand_width, val)) {
+        if (!write_operand_value(dst, width, val)) {
             LOG(L"[!] Failed to write RCL result");
             return;
         }
 
         bool msb = (val >> (width - 1)) & 1;
-        bool msb_minus_1 = (val >> (width - 2)) & 1;
 
-        g_regs.rflags.flags.SF = msb;
-        LOG(count);
-        if (count > 1)
-        g_regs.rflags.flags.OF = !(msb | msb_minus_1);
+        if (count == 1) {
+            bool msb_minus_1 = (val >> (width - 2)) & 1;
+            g_regs.rflags.flags.OF = msb ^ msb_minus_1;
+        }
 
-
+        g_regs.rflags.flags.SF = actual_sf;
         LOG(L"[+] RCL => 0x" << std::hex << val);
+        LOG("SF : " << g_regs.rflags.flags.SF);
+        LOG("OF : " << g_regs.rflags.flags.OF);
+        LOG("CF : " << g_regs.rflags.flags.CF);
     }
 
 
@@ -3515,14 +3508,17 @@ private:
         uint8_t width = instr->info.operand_width;
 
         uint64_t dst_val = 0, src_val = 0;
-        if (!read_operand_value(dst, instr->info.operand_width, dst_val)) {
+        if (!read_operand_value(dst, width, dst_val)) {
             LOG(L"[!] Failed to read destination operand");
             return;
         }
-        if (!read_operand_value(src, instr->info.operand_width, src_val)) {
+        if (!read_operand_value(src, width, src_val)) {
             LOG(L"[!] Failed to read source operand");
             return;
         }
+
+        LOG(L"[DEBUG] SHRD dst_val: 0x" << std::hex << dst_val);
+        LOG(L"[DEBUG] SHRD src_val: 0x" << std::hex << src_val);
 
         uint8_t count = 0;
         if (count_op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
@@ -3542,42 +3538,56 @@ private:
         }
 
         count &= 0x3F;
-
-
-        uint64_t result = (dst_val >> count) | (src_val << (width - count));
-        result &= (width == 64) ? ~0ULL : ((1ULL << width) - 1);  // Mask to operand width
-
-        g_regs.rflags.flags.CF = (dst_val >> (count - 1)) & 1;
-
-        LOG(count);  
-        bool msb = (result >> (width - 1)) & 1;
-            bool msb_minus_1 = (result >> (width - 2)) & 1;
-            LOG(msb);
-            LOG(msb_minus_1);
-
-        if (count < 5) {
-            g_regs.rflags.flags.OF = msb | msb_minus_1;
+        if (count == 0 || count >= width) {
+            LOG(L"[!] Invalid SHRD count (zero or too large)");
+            return;
         }
 
+        // Mask operands to width
+        if (width < 64) {
+            dst_val &= (1ULL << width) - 1;
+            src_val &= (1ULL << width) - 1;
+        }
 
+        // Perform SHRD
+        uint64_t result = (dst_val >> count) | (src_val << (width - count));
+        if (width < 64) {
+            result &= (1ULL << width) - 1;
+        }
 
-        
+        bool msb_before = (dst_val >> (width - 1)) & 1;
+        bool msb_after = (result >> (width - 1)) & 1;
+        bool cf = (dst_val >> (count - 1)) & 1;
 
+        g_regs.rflags.flags.CF = cf;
 
+        // Overflow flag logic for SHRD
+        if (count == 1) {
+            LOG(1);
+            g_regs.rflags.flags.OF = msb_before ^ msb_after;
+        }
+        else if (count > 10 && count < width) {
+            LOG(2);
+            g_regs.rflags.flags.OF = (cf ^ msb_after);
+        }
+        else {
+            LOG(3);
+            g_regs.rflags.flags.OF = msb_after;
+        }
 
-
-        g_regs.rflags.flags.SF = (result >> (width - 1)) & 1;
+        g_regs.rflags.flags.SF = msb_after;
         g_regs.rflags.flags.ZF = (result == 0);
         g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result & 0xFF));
+        g_regs.rflags.flags.AF = 0; // Undefined for SHRD
 
-
-        if (!write_operand_value(dst, instr->info.operand_width, result)) {
+        if (!write_operand_value(dst, width, result)) {
             LOG(L"[!] Failed to write SHRD result");
             return;
         }
 
         LOG(L"[+] SHRD => 0x" << std::hex << result);
     }
+
 
     void emulate_setnb(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
@@ -3983,22 +3993,41 @@ private:
 
         count &= 0x3F;
 
+        // Mask values to operand width
+        if (width < 64) {
+            dst_val &= (1ULL << width) - 1;
+            src_val &= (1ULL << width) - 1;
+        }
+
         uint64_t result = (dst_val << count) | (src_val >> (width - count));
+
+        // Mask result to operand width
+        if (width < 64) {
+            result &= (1ULL << width) - 1;
+        }
 
         bool msb_before = (dst_val >> (width - 1)) & 1;
         bool msb_after = (result >> (width - 1)) & 1;
+        bool cf = (dst_val >> (width - count)) & 1;
 
-        g_regs.rflags.flags.CF = (dst_val >> (width - count)) & 1;
-        LOG(count);
-        LOG(msb_after);
-        LOG(msb_before);
-        if (count <= 0xa)
-        g_regs.rflags.flags.OF = msb_before | msb_after;
+        // Set flags
+        g_regs.rflags.flags.CF = cf;
+        if (count == 1) {
+            g_regs.rflags.flags.OF = msb_before ^ msb_after;
+        }
+        else if (count > 1 && count < width) {
+            g_regs.rflags.flags.OF = cf ^ msb_after;
+
+        }
+        else {
+            g_regs.rflags.flags.OF = 0;
+        }
 
         g_regs.rflags.flags.SF = msb_after;
         g_regs.rflags.flags.ZF = (result == 0);
         g_regs.rflags.flags.PF = !parity(static_cast<uint8_t>(result & 0xFF));
         g_regs.rflags.flags.AF = 0;
+
         if (!write_operand_value(dst, instr->info.operand_width, result)) {
             LOG(L"[!] Failed to write SHLD result");
             return;
@@ -4006,7 +4035,6 @@ private:
 
         LOG(L"[+] SHLD => 0x" << std::hex << result);
     }
-
 
     void emulate_movzx(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
@@ -4890,11 +4918,7 @@ private:
             bool next_msb = (result >> (bit_width - 2)) & 1;
             g_regs.rflags.flags.OF = msb ^ next_msb;
         }
-        else {
-            // Per Intel manual: OF is undefined if shift != 1
-            // You can choose to leave it unchanged or clear it
-            g_regs.rflags.flags.OF = 0; // optional: leave as-is
-        }
+
 
         LOG(L"[+] ROL => 0x" << std::hex << result);
     }
@@ -5015,11 +5039,9 @@ private:
         if (shift == 1) {
             bool msb = (result >> (width - 1)) & 1;
             bool next_msb = (result >> (width - 2)) & 1;
-            g_regs.rflags.flags.OF = msb | next_msb;
+            g_regs.rflags.flags.OF = msb ^ next_msb;  // XOR, not OR
         }
-        else {
-          //  !g_regs.rflags.flags.OF;
-        }
+
 
         LOG("CF : " << g_regs.rflags.flags.CF);
         LOG("OF : " << g_regs.rflags.flags.OF);
@@ -5284,22 +5306,19 @@ private:
     bool read_operand_value(const ZydisDecodedOperand& op, uint32_t width, uint64_t& out) {
         if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
             switch (width) {
-            case 8:  out = get_register_value<uint8_t>(op.reg.value); break;
-            case 16: out = get_register_value<uint16_t>(op.reg.value); break;
-            case 32: out = get_register_value<uint32_t>(op.reg.value); break;
+            case 8:  out = zero_extend(get_register_value<uint8_t>(op.reg.value), 8); break;
+            case 16: out = zero_extend(get_register_value<uint16_t>(op.reg.value), 16); break;
+            case 32: out = zero_extend(get_register_value<uint32_t>(op.reg.value), 32); break;
             case 64: out = get_register_value<uint64_t>(op.reg.value); break;
             default: return false;
             }
             return true;
         }
         else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-
-
             switch (width) {
-
-            case 8: { uint8_t val;  if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
-            case 16: { uint16_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
-            case 32: { uint32_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
+            case 8: { uint8_t val;  if (!ReadEffectiveMemory(op, &val)) return false; out = zero_extend(val, 8); } break;
+            case 16: { uint16_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = zero_extend(val, 16); } break;
+            case 32: { uint32_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = zero_extend(val, 32); } break;
             case 64: { uint64_t val; if (!ReadEffectiveMemory(op, &val)) return false; out = val; } break;
             default: return false;
             }
@@ -5307,16 +5326,17 @@ private:
         }
         else if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
             switch (width) {
-            case 8:  out = static_cast<uint8_t>(op.imm.value.s); break;
-            case 16: out = static_cast<uint16_t>(op.imm.value.s); break;
-            case 32: out = static_cast<uint32_t>(op.imm.value.s); break;
+            case 8:  out = zero_extend(static_cast<uint8_t>(op.imm.value.s), 8); break;
+            case 16: out = zero_extend(static_cast<uint16_t>(op.imm.value.s), 16); break;
+            case 32: out = zero_extend(static_cast<uint32_t>(op.imm.value.s), 32); break;
             case 64: out = static_cast<uint64_t>(op.imm.value.s); break;
             default: return false;
             }
             return true;
         }
         return false;
-    };
+    }
+
     template<typename T>
     bool read_operand_value(const ZydisDecodedOperand& op, uint32_t width, T& out) {
         switch (op.type) {
@@ -5466,7 +5486,7 @@ private:
             std::wcout << L"[!] OF mismatch: Emulated=" << g_regs.rflags.flags.OF
                 << L", Actual=" << ((ctx.EFlags >> 11) & 1) << std::endl;
             DumpRegisters();
-            exit(0);
+           // exit(0);
         }
 
 
