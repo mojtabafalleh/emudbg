@@ -18,7 +18,7 @@
 //LOG everything
 #define LOG_ENABLED 1
 //test with real cpu
-#define DB_ENABLED 0
+#define DB_ENABLED 1
 //------------------------------------------
 
 
@@ -908,7 +908,9 @@ public:
         g_regs.r14.q = ctx.R14;
         g_regs.r15.q = ctx.R15;
         g_regs.rflags.value = ctx.EFlags;
-
+#if DB_ENABLED
+        g_regs.rflags.flags.TF = 1;
+#endif
         for (int i = 0; i < 16; i++) {
             memcpy(g_regs.ymm[i].xmm, (&ctx.Xmm0) + i, 16);
         }
@@ -1923,7 +1925,21 @@ private:
         uint64_t check_val = (operand_count == 1) ? (result128.low & ((1ULL << (width * 8)) - 1)) : (static_cast<uint64_t>(result64) & ((1ULL << (width * 8)) - 1));
         g_regs.rflags.flags.ZF = (operand_count == 1) ? (result128.low == 0) : 0;
 
-        g_regs.rflags.flags.SF = (check_val >> ((width * 8) - 1)) & 1;
+        switch (width) {
+        case 8:
+            g_regs.rflags.flags.SF = ((int8_t)result64 < 0);
+            break;
+        case 16:
+            g_regs.rflags.flags.SF = ((int16_t)result64 < 0);
+            break;
+        case 32:
+            g_regs.rflags.flags.SF = ((int32_t)result64 < 0);
+            break;
+        case 64:
+            g_regs.rflags.flags.SF = ((int64_t)result64 < 0);
+            break;
+        }
+
         g_regs.rflags.flags.OF = overflow;
         g_regs.rflags.flags.CF = carry;
         g_regs.rflags.flags.AF = 0;
