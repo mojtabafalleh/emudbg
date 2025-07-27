@@ -2168,7 +2168,7 @@ private:
             return;
         }
 
-        g_regs.rflags.flags.CF = (result64 >> width) & 1;
+        g_regs.rflags.flags.CF = (dst_val < (src_val + borrow));
 
         // Zero Flag (ZF)
         g_regs.rflags.flags.ZF = (result == 0);
