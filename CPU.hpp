@@ -14,11 +14,11 @@
 
 //------------------------------------------
 //LOG analyze 
-#define analyze_ENABLED 1
+#define analyze_ENABLED 0
 //LOG everything
-#define LOG_ENABLED 0
+#define LOG_ENABLED 1
 //test with real cpu
-#define DB_ENABLED 0
+#define DB_ENABLED 1
 //------------------------------------------
 
 
@@ -1668,6 +1668,7 @@ private:
         }
         LOG(L"[+] vzeroupper executed: upper 128 bits of all ymm registers zeroed.");
     }
+
     void emulate_mul(const ZydisDisassembledInstruction* instr) {
         const auto& operands = instr->operands;
         int operand_count = instr->info.operand_count_visible;
@@ -1699,53 +1700,61 @@ private:
         val1 &= mask;
         val2 &= mask;
 
-        uint128_t result = mul_64x64_to_128(val1, val2);
 
-        if (operand_count == 1) {
+        uint64_t result_low = 0;
+        uint64_t result_high = 0;
+
+        switch (width) {
+        case 8: {
             g_regs.rax.q = 0;
             g_regs.rdx.q = 0;
+            uint16_t result = static_cast<uint16_t>(static_cast<uint8_t>(val1)) * static_cast<uint8_t>(val2);
+            g_regs.rax.l = static_cast<uint8_t>(result & 0xFF);
+            g_regs.rax.h = static_cast<uint8_t>((result >> 8) & 0xFF);
+            result_low = result;
+            result_high = result >> 8;
+            break;
         }
-
-        // Store result in RAX and RDX
-        switch (width) {
-        case 8:
-            g_regs.rax.l = static_cast<uint8_t>(result.low & 0xFF);
-            g_regs.rax.h = static_cast<uint8_t>((result.low >> 8) & 0xFF);
+        case 16: {
+            g_regs.rax.q = 0;
+            g_regs.rdx.q = 0;
+            uint32_t result = static_cast<uint16_t>(val1) * static_cast<uint16_t>(val2);
+            g_regs.rax.w = static_cast<uint16_t>(result & 0xFFFF);
+            g_regs.rdx.w = static_cast<uint16_t>((result >> 16) & 0xFFFF);
+            result_low = result;
+            result_high = result >> 16;
             break;
-
-        case 16:
-            g_regs.rax.w = static_cast<uint16_t>(result.low & 0xFFFF);
-            g_regs.rdx.w = static_cast<uint16_t>((result.low >> 16) & 0xFFFF);
+        }
+        case 32: {
+            g_regs.rax.q = 0;
+            g_regs.rdx.q = 0;
+            uint64_t result = static_cast<uint64_t>(static_cast<uint32_t>(val1)) * static_cast<uint32_t>(val2);
+            g_regs.rax.d = static_cast<uint32_t>(result & 0xFFFFFFFF);
+            g_regs.rdx.d = static_cast<uint32_t>((result >> 32) & 0xFFFFFFFF);
+            result_low = result;
+            result_high = result >> 32;
             break;
-
-        case 32:
-            g_regs.rax.d = static_cast<uint32_t>(result.low);
-            g_regs.rdx.d = static_cast<uint32_t>(result.high);
-            break;
-
-        case 64:
+        }
+        case 64: {
+            uint128_t result = mul_64x64_to_128(val1, val2);
             g_regs.rax.q = result.low;
             g_regs.rdx.q = result.high;
+            result_low = result.low;
+            result_high = result.high;
             break;
+        }
         }
 
         LOG(L"[+] MUL (" << width << L"bit) => RDX:RAX = 0x"
-            << std::hex << result.high << L":" << result.low);
+            << std::hex << result_high << L":" << result_low);
 
-        // Update CF and OF based on upper half of result
-        bool upper_nonzero = false;
-        switch (width) {
-        case 8:  upper_nonzero = (g_regs.rax.h != 0); break;
-        case 16: upper_nonzero = (g_regs.rdx.w != 0); break;
-        case 32: upper_nonzero = (g_regs.rdx.d != 0); break;
-        case 64: upper_nonzero = (g_regs.rdx.q != 0); break;
-        }
-
+        bool upper_nonzero = result_high != 0;
         g_regs.rflags.flags.CF = upper_nonzero;
         g_regs.rflags.flags.OF = upper_nonzero;
-        g_regs.rflags.flags.PF = (parity(result.high) == parity(result.low));
+
         g_regs.rflags.flags.ZF = 0;
         g_regs.rflags.flags.AF = 0;
+        g_regs.rflags.flags.PF =  !parity(result_low);
 
         switch (width) {
         case 8:
@@ -1762,6 +1771,7 @@ private:
             break;
         }
     }
+
 
     void emulate_scasd(const ZydisDisassembledInstruction* instr) {
 
@@ -1799,10 +1809,7 @@ private:
         int64_t val1 = 0, val2 = 0, imm = 0;
         uint128_t result128 = { 0, 0 };
         int64_t result64 = 0;
-        if (operand_count == 1) {
-            g_regs.rax.q = 0;
-            g_regs.rdx.q = 0;
-        }
+
         if (operand_count == 1) {
             val1 = read_signed_operand(ops[0], width);
             // val2 = RAX (implicit)
