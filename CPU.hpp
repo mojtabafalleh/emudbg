@@ -699,6 +699,12 @@ public:
             { ZYDIS_MNEMONIC_SETL, &CPU::emulate_setl },
             { ZYDIS_MNEMONIC_JO, &CPU::emulate_jo },
             { ZYDIS_MNEMONIC_CMOVNLE, &CPU::emulate_cmovnle },
+            { ZYDIS_MNEMONIC_SETNP, &CPU::emulate_setnp },
+            { ZYDIS_MNEMONIC_SETNL, &CPU::emulate_setnl },
+            { ZYDIS_MNEMONIC_SETS, &CPU::emulate_sets },
+            { ZYDIS_MNEMONIC_SETNO, &CPU::emulate_setno },
+            { ZYDIS_MNEMONIC_SETLE, &CPU::emulate_setle },
+            { ZYDIS_MNEMONIC_SETO, &CPU::emulate_seto },
             
         };
 
@@ -1673,6 +1679,21 @@ private:
 
         LOG(L"[+] SETL => " << std::hex << static_cast<int>(value));
     }
+    void emulate_setle(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+
+        bool condition = (g_regs.rflags.flags.ZF == 1) ||
+            (g_regs.rflags.flags.SF != g_regs.rflags.flags.OF);
+
+        uint8_t value = condition ? 1 : 0;
+
+        if (!write_operand_value(dst, 8, value)) {
+            LOG(L"[!] Failed to write operand for SETLE");
+            return;
+        }
+
+        LOG(L"[+] SETLE => " << std::hex << static_cast<int>(value));
+    }
 
 
     void emulate_pushfq(const ZydisDisassembledInstruction* instr) {
@@ -2048,6 +2069,18 @@ private:
         update_flags_add(result, dst_val, src_val, width);
         LOG(L"[+] XADD executed (width: " << width << ")");
     }
+    void emulate_seto(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+
+        uint8_t value = g_regs.rflags.flags.OF;
+
+        if (!write_operand_value(dst, 8, value)) {
+            LOG(L"[!] Failed to write operand for SETO");
+            return;
+        }
+
+        LOG(L"[+] SETO => " << std::hex << static_cast<int>(value));
+    }
 
     void emulate_cmovnle(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
@@ -2100,6 +2133,18 @@ private:
         }
 
         LOG(L"[+] XORPS executed successfully");
+    }
+    void emulate_sets(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+
+        uint8_t value = g_regs.rflags.flags.SF ? 1 : 0;
+
+        if (!write_operand_value(dst, 8, value)) {
+            LOG(L"[!] Failed to write operand for SETS");
+            return;
+        }
+
+        LOG(L"[+] SETS => " << std::hex << static_cast<int>(value));
     }
 
 
@@ -2172,6 +2217,18 @@ private:
         else {
             LOG(L"[+] CMOVNL skipped: condition not met");
         }
+    }
+    void emulate_setnl(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+
+        uint8_t value = (g_regs.rflags.flags.SF == g_regs.rflags.flags.OF) ? 1 : 0;
+
+        if (!write_operand_value(dst, 8, value)) {
+            LOG(L"[!] Failed to write operand for SETNL");
+            return;
+        }
+
+        LOG(L"[+] SETNL => " << std::hex << static_cast<int>(value));
     }
 
 
@@ -2607,6 +2664,18 @@ private:
         set_register_value<uint64_t>(dst.reg.value, value);
 
         LOG(L"[+] LEA => 0x" << std::hex << value);
+    }
+    void emulate_setno(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+
+        uint8_t value = g_regs.rflags.flags.OF ? 0 : 1;
+
+        if (!write_operand_value(dst, 8, value)) {
+            LOG(L"[!] Failed to write operand for SETNO");
+            return;
+        }
+
+        LOG(L"[+] SETNO => " << std::hex << static_cast<int>(value));
     }
 
     void emulate_jo(const ZydisDisassembledInstruction* instr) {
@@ -4417,6 +4486,18 @@ private:
         LOG(L"[+] SHR => 0x" << std::hex << val);
     }
 
+    void emulate_setnp(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+
+        uint8_t value = (g_regs.rflags.flags.PF == 0) ? 1 : 0;
+
+        if (!write_operand_value(dst, 8, value)) {
+            LOG(L"[!] Failed to write destination operand for SETNP");
+            return;
+        }
+
+        LOG(L"[+] SETNP => " << std::hex << static_cast<int>(value));
+    }
 
     void emulate_stosb(const ZydisDisassembledInstruction* instr) {
         uint8_t al_val = static_cast<uint8_t>(g_regs.rax.l);
@@ -5417,9 +5498,15 @@ private:
     void emulate_setp(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
         uint8_t value = g_regs.rflags.flags.PF ? 1 : 0;
-        set_register_value<uint8_t>(dst.reg.value, value);
+
+        if (!write_operand_value(dst, 8, value)) {
+            LOG(L"[!] Failed to write operand for SETP");
+            return;
+        }
+
         LOG(L"[+] SETP => " << std::hex << static_cast<int>(value));
     }
+
 
 
     void emulate_jns(const ZydisDisassembledInstruction* instr) {
