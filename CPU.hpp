@@ -14,11 +14,11 @@
 
 //------------------------------------------
 //LOG analyze 
-#define analyze_ENABLED 1
+#define analyze_ENABLED 0
 //LOG everything
-#define LOG_ENABLED 0
+#define LOG_ENABLED 1
 //test with real cpu
-#define DB_ENABLED 0
+#define DB_ENABLED 1
 //------------------------------------------
 
 
@@ -2953,19 +2953,15 @@ private:
         g_regs.rflags.flags.SF = msb_minus_1;
 
         g_regs.rflags.flags.OF = msb ^ msb_minus_1;
-        g_regs.rflags.flags.ZF = (zero_extend(val, width) == 0);
 
 
         LOG(L"[+] RCR => 0x" << std::hex << val);
     }
+
     void emulate_rcl(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
         const auto& src = instr->operands[1];
         uint8_t width = instr->info.operand_width;
-
-        uint64_t actual_val = get_register_value<uint64_t>(dst.reg.value);
-        uint32_t val32 = static_cast<uint32_t>(actual_val & 0xFFFFFFFF);
-        bool actual_sf = (val32 >> (width - 1)) & 1;
 
         uint64_t val = 0;
         if (!read_operand_value(dst, width, val)) {
@@ -2985,8 +2981,7 @@ private:
             return;
         }
 
-        count %= (width + 1);
-
+        count %= width;
         if (count == 0) {
             LOG(L"[+] RCL => no operation");
             return;
@@ -2996,7 +2991,8 @@ private:
 
         for (int i = 0; i < count; ++i) {
             bool new_CF = (val >> (width - 1)) & 1;
-            val = ((val << 1) & ((1ULL << width) - 1)) | (old_CF ? 1 : 0);
+            val = (val << 1) | (old_CF ? 1 : 0);
+            val &= (width == 64) ? 0xFFFFFFFFFFFFFFFFULL : ((1ULL << width) - 1);
             old_CF = new_CF;
         }
 
@@ -3007,14 +3003,14 @@ private:
             return;
         }
 
-        bool msb = (val >> (width - 1)) & 1;
+
 
         if (count == 1) {
-            bool msb_minus_1 = (val >> (width - 2)) & 1;
-            g_regs.rflags.flags.OF = msb ^ msb_minus_1;
+            bool msb = (val >> (width - 1)) & 1;
+            bool msb_prev = (val >> (width - 2)) & 1;
+            g_regs.rflags.flags.OF = msb ^ msb_prev;
         }
 
-        g_regs.rflags.flags.SF = actual_sf;
         LOG(L"[+] RCL => 0x" << std::hex << val);
         LOG("SF : " << g_regs.rflags.flags.SF);
         LOG("OF : " << g_regs.rflags.flags.OF);
