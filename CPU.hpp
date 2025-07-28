@@ -14,11 +14,11 @@
 
 //------------------------------------------
 //LOG analyze 
-#define analyze_ENABLED 0
+#define analyze_ENABLED 1
 //LOG everything
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 //test with real cpu
-#define DB_ENABLED 1
+#define DB_ENABLED 0
 //------------------------------------------
 
 
@@ -733,7 +733,7 @@ public:
         Zydis disasm(true);
 
         while (true) {
-
+            //DumpRegisters();
             if (!ReadProcessMemory(pi.hProcess, (LPCVOID)address, buffer, sizeof(buffer), &bytesRead) || bytesRead == 0) {
                 DWORD err = GetLastError();
                 LOG(L"[!] Failed to read memory at 0x" << std::hex << address
@@ -1041,8 +1041,9 @@ public:
         };
     }
     bool ApplyRegistersToContext(CONTEXT& ctx) {
-
-
+#if DB_ENABLED
+        g_regs.rflags.flags.TF = 0;
+#endif
         ctx.Rip = g_regs.rip;
         ctx.Rsp = g_regs.rsp.q;
         ctx.Rbp = g_regs.rbp.q;
@@ -1700,9 +1701,10 @@ private:
 
         uint128_t result = mul_64x64_to_128(val1, val2);
 
-        // Clear RDX and RAX fully before writing
-        g_regs.rax.q = 0;
-        g_regs.rdx.q = 0;
+        if (operand_count == 1) {
+            g_regs.rax.q = 0;
+            g_regs.rdx.q = 0;
+        }
 
         // Store result in RAX and RDX
         switch (width) {
@@ -1797,9 +1799,10 @@ private:
         int64_t val1 = 0, val2 = 0, imm = 0;
         uint128_t result128 = { 0, 0 };
         int64_t result64 = 0;
-
-        g_regs.rax.q = 0;
-        g_regs.rdx.q = 0;
+        if (operand_count == 1) {
+            g_regs.rax.q = 0;
+            g_regs.rdx.q = 0;
+        }
         if (operand_count == 1) {
             val1 = read_signed_operand(ops[0], width);
             // val2 = RAX (implicit)
