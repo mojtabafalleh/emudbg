@@ -16,9 +16,9 @@
 //LOG analyze 
 #define analyze_ENABLED 0
 //LOG everything
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 //test with real cpu
-#define DB_ENABLED 1
+#define DB_ENABLED 0
 //------------------------------------------
 
 
@@ -691,6 +691,8 @@ public:
             { ZYDIS_MNEMONIC_CMOVNO, &CPU::emulate_cmovno },
             { ZYDIS_MNEMONIC_JP, &CPU::emulate_jp },
             { ZYDIS_MNEMONIC_CMOVLE, &CPU::emulate_cmovle },
+            { ZYDIS_MNEMONIC_PREFETCHW, &CPU::emulate_prefetchw },
+            { ZYDIS_MNEMONIC_BTS, &CPU::emulate_bts },
             
         };
 
@@ -2412,6 +2414,8 @@ private:
         LOG(L"[+] OR => 0x" << std::hex << result);
     }
 
+    void emulate_prefetchw(const ZydisDisassembledInstruction* instr) {
+    }
 
     void emulate_vinsertf128(const ZydisDisassembledInstruction* instr) {
         if (instr->info.operand_count < 3 || instr->info.operand_count > 4) {
@@ -2755,18 +2759,15 @@ private:
 
         LOG(L"[+] SETB => " << value);
     }
-
-
-    void emulate_bt(const ZydisDisassembledInstruction* instr) {
+    void emulate_bts(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
         const auto& src = instr->operands[1];
+        const uint32_t width = instr->info.operand_width;
 
         uint64_t bit_base = 0;
-        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            bit_base = get_register_value<uint64_t>(dst.reg.value);
-        }
-        else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-            ReadEffectiveMemory(dst, &bit_base);
+        if (!read_operand_value(dst, width, bit_base)) {
+            LOG(L"[!] Failed to read operand for BTS");
+            return;
         }
 
         uint64_t shift = 0;
@@ -2776,6 +2777,46 @@ private:
         else {
             shift = src.imm.value.u;
         }
+
+        // Calculate bit position (modulo operand size)
+        uint32_t bit_limit = width;
+        shift %= bit_limit;
+
+        // Set CF to old bit
+        g_regs.rflags.flags.CF = (bit_base >> shift) & 1;
+
+        // Set bit
+        bit_base |= (1ULL << shift);
+
+        if (!write_operand_value(dst, width, bit_base)) {
+            LOG(L"[!] Failed to write back result in BTS");
+            return;
+        }
+
+        LOG(L"[+] BTS => CF = " << g_regs.rflags.flags.CF << L", Result: 0x" << std::hex << bit_base);
+    }
+
+    void emulate_bt(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+        const uint32_t width = instr->info.operand_width;
+
+        uint64_t bit_base = 0;
+        if (!read_operand_value(dst, width, bit_base)) {
+            LOG(L"[!] Failed to read operand for BT");
+            return;
+        }
+
+        uint64_t shift = 0;
+        if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            shift = get_register_value<uint64_t>(src.reg.value);
+        }
+        else {
+            shift = src.imm.value.u;
+        }
+
+        shift %= width;
+
 
         g_regs.rflags.flags.CF = (bit_base >> shift) & 1;
 
@@ -2785,13 +2826,12 @@ private:
     void emulate_btr(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
         const auto& src = instr->operands[1];
+        const uint32_t width = instr->info.operand_width;
 
         uint64_t bit_base = 0;
-        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            bit_base = get_register_value<uint64_t>(dst.reg.value);
-        }
-        else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-            ReadEffectiveMemory(dst, &bit_base);
+        if (!read_operand_value(dst, width, bit_base)) {
+            LOG(L"[!] Failed to read operand for BTR");
+            return;
         }
 
         uint64_t shift = 0;
@@ -2802,14 +2842,16 @@ private:
             shift = src.imm.value.u;
         }
 
+        shift %= width;
+
+
         g_regs.rflags.flags.CF = (bit_base >> shift) & 1;
+
         bit_base &= ~(1ULL << shift);
 
-        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            set_register_value<uint64_t>(dst.reg.value, bit_base);
-        }
-        else if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
-            WriteEffectiveMemory(dst, bit_base);
+        if (!write_operand_value(dst, width, bit_base)) {
+            LOG(L"[!] Failed to write operand for BTR");
+            return;
         }
 
         LOG(L"[+] BTR => CF = " << g_regs.rflags.flags.CF << L", Result: 0x" << std::hex << bit_base);
