@@ -760,6 +760,7 @@ public:
 #if DB_ENABLED
                 is_cpuid = 0;
                 my_mange.is_write = 0;
+                g_regs.rflags.flags.TF = 1;
 #endif
 
 
@@ -3185,14 +3186,17 @@ private:
 
 
 
+
         if (count == 1) {
             bool msb = (val >> (width - 1)) & 1;
-            bool msb_prev = (val >> (width - 2)) & 1;
-            g_regs.rflags.flags.OF = msb ^ msb_prev;
+            bool of = msb ^ g_regs.rflags.flags.CF;
+            g_regs.rflags.flags.OF = of;
+        }
+        else {
+            g_regs.rflags.flags.OF = !g_regs.rflags.flags.OF;
         }
 
         LOG(L"[+] RCL => 0x" << std::hex << val);
-        LOG("SF : " << g_regs.rflags.flags.SF);
         LOG("OF : " << g_regs.rflags.flags.OF);
         LOG("CF : " << g_regs.rflags.flags.CF);
     }
@@ -3696,8 +3700,6 @@ private:
             return;
         }
 
-        LOG(L"[DEBUG] SHRD dst_val: 0x" << std::hex << dst_val);
-        LOG(L"[DEBUG] SHRD src_val: 0x" << std::hex << src_val);
 
         uint8_t count = 0;
         if (count_op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
@@ -3753,6 +3755,9 @@ private:
             LOG(3);
             g_regs.rflags.flags.OF = msb_after;
         }
+  
+
+
 
         g_regs.rflags.flags.SF = msb_after;
         g_regs.rflags.flags.ZF = (result == 0);
@@ -4153,7 +4158,6 @@ private:
         const auto& src = instr->operands[1];
         const auto& count_op = instr->operands[2];
         uint8_t width = instr->info.operand_width;
-
         uint64_t dst_val = 0, src_val = 0;
         if (!read_operand_value(dst, instr->info.operand_width, dst_val)) {
             LOG(L"[!] Failed to read destination operand");
@@ -4203,15 +4207,23 @@ private:
         // Set flags
         g_regs.rflags.flags.CF = cf;
         if (count == 1) {
-            g_regs.rflags.flags.OF = msb_before ^ msb_after;
-        }
-        else if (count > 1 && count < width) {
-            g_regs.rflags.flags.OF = cf ^ msb_after;
-
+         g_regs.rflags.flags.OF = msb_before ^ msb_after;
         }
         else {
+            // Check if any of the high bits from dst_val are shifted out
+ 
+            uint64_t mask = ((1ULL << count) - 1) << (64 - count);
+            bool shifted_out = (dst_val & mask) != 0;
+            LOG(shifted_out);
+            g_regs.rflags.flags.OF = !shifted_out;
+        }
+
+        if (dst.reg.value == src.reg.value) {
             g_regs.rflags.flags.OF = 0;
         }
+
+
+
 
         g_regs.rflags.flags.SF = msb_after;
         g_regs.rflags.flags.ZF = (result == 0);
@@ -5716,7 +5728,7 @@ private:
             std::wcout << L"[!] OF mismatch: Emulated=" << g_regs.rflags.flags.OF
                 << L", Actual=" << ((ctx.EFlags >> 11) & 1) << std::endl;
             DumpRegisters();
-           // exit(0);
+            exit(0);
         }
 
 
