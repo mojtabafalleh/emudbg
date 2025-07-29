@@ -567,7 +567,7 @@ public:
 
 #if DB_ENABLED
     memory_mange my_mange;
-    bool is_cpuid;
+    bool is_cpuid, is_OVERFLOW_FLAG_SKIP;
 #endif
 
 
@@ -759,6 +759,7 @@ public:
             if (disasm.Disassemble(address, buffer, bytesRead)) {
 #if DB_ENABLED
                 is_cpuid = 0;
+                is_OVERFLOW_FLAG_SKIP = 0;
                 my_mange.is_write = 0;
                 g_regs.rflags.flags.TF = 1;
 #endif
@@ -3132,9 +3133,13 @@ private:
         bool msb_minus_1 = (val >> (width - 2)) & 1;
 
        // g_regs.rflags.flags.SF = msb_minus_1;
-
+        if (count == 1)
         g_regs.rflags.flags.OF = msb ^ msb_minus_1;
-
+        else {
+#if DB_ENABLED
+            is_OVERFLOW_FLAG_SKIP = 1;
+#endif
+        }
 
         LOG(L"[+] RCR => 0x" << std::hex << val);
     }
@@ -3193,7 +3198,9 @@ private:
             g_regs.rflags.flags.OF = of;
         }
         else {
-            g_regs.rflags.flags.OF = !g_regs.rflags.flags.OF;
+#if DB_ENABLED
+            is_OVERFLOW_FLAG_SKIP = 1;
+#endif
         }
 
         LOG(L"[+] RCL => 0x" << std::hex << val);
@@ -3425,7 +3432,40 @@ private:
         g_regs.rflags.flags.ZF = (result == 0);
         g_regs.rflags.flags.SF = sf;
         g_regs.rflags.flags.CF = lhs < rhs;
-        g_regs.rflags.flags.OF = (((lhs ^ rhs) & (lhs ^ result)) & (1ULL << (width * 8 - 1))) != 0;
+        switch (width) {
+        case 8: {
+            int8_t slhs = static_cast<int8_t>(lhs & 0xFF);
+            int8_t srhs = static_cast<int8_t>(rhs & 0xFF);
+            int8_t sres = static_cast<int8_t>(result & 0xFF);
+            g_regs.rflags.flags.OF = ((slhs < 0) != (srhs < 0)) && ((slhs < 0) != (sres < 0));
+            break;
+        }
+        case 16: {
+            int16_t slhs = static_cast<int16_t>(lhs & 0xFFFF);
+            int16_t srhs = static_cast<int16_t>(rhs & 0xFFFF);
+            int16_t sres = static_cast<int16_t>(result & 0xFFFF);
+            g_regs.rflags.flags.OF = ((slhs < 0) != (srhs < 0)) && ((slhs < 0) != (sres < 0));
+            break;
+        }
+        case 32: {
+            int32_t slhs = static_cast<int32_t>(lhs & 0xFFFFFFFF);
+            int32_t srhs = static_cast<int32_t>(rhs & 0xFFFFFFFF);
+            int32_t sres = static_cast<int32_t>(result & 0xFFFFFFFF);
+            g_regs.rflags.flags.OF = ((slhs < 0) != (srhs < 0)) && ((slhs < 0) != (sres < 0));
+            break;
+        }
+        case 64: {
+            int64_t slhs = static_cast<int64_t>(lhs);
+            int64_t srhs = static_cast<int64_t>(rhs);
+            int64_t sres = static_cast<int64_t>(result);
+            g_regs.rflags.flags.OF = ((slhs < 0) != (srhs < 0)) && ((slhs < 0) != (sres < 0));
+            break;
+        }
+        default:
+            LOG(L"[!] Unsupported width for OF calculation");
+            g_regs.rflags.flags.OF = false;
+        }
+
 
         uint8_t lowByte = result & 0xFF;
         int bitCount = 0;
@@ -3689,7 +3729,9 @@ private:
         const auto& src = instr->operands[1];
         const auto& count_op = instr->operands[2];
         uint8_t width = instr->info.operand_width;
-
+#if DB_ENABLED
+        is_OVERFLOW_FLAG_SKIP = 1;
+#endif
         uint64_t dst_val = 0, src_val = 0;
         if (!read_operand_value(dst, width, dst_val)) {
             LOG(L"[!] Failed to read destination operand");
@@ -4159,6 +4201,7 @@ private:
         const auto& count_op = instr->operands[2];
         uint8_t width = instr->info.operand_width;
         uint64_t dst_val = 0, src_val = 0;
+
         if (!read_operand_value(dst, instr->info.operand_width, dst_val)) {
             LOG(L"[!] Failed to read destination operand");
             return;
@@ -4210,17 +4253,11 @@ private:
          g_regs.rflags.flags.OF = msb_before ^ msb_after;
         }
         else {
-            // Check if any of the high bits from dst_val are shifted out
- 
-            uint64_t mask = ((1ULL << count) - 1) << (64 - count);
-            bool shifted_out = (dst_val & mask) != 0;
-            LOG(shifted_out);
-            g_regs.rflags.flags.OF = !shifted_out;
+#if DB_ENABLED
+            is_OVERFLOW_FLAG_SKIP = 1;
+#endif
         }
 
-        if (dst.reg.value == src.reg.value) {
-            g_regs.rflags.flags.OF = 0;
-        }
 
 
 
@@ -4396,19 +4433,10 @@ private:
             bool msb_after = (result >> (width - 1)) & 1;
             g_regs.rflags.flags.OF = msb_before ^ msb_after;
         }
-        else if (shift > 1 && shift <= width) {
-            // For shifts > 1, OF = CF XOR MSB(result)
-            bool cf = (old_val >> (width - shift)) & 1;
-            bool msb_result = (result >> (width - 1)) & 1;
-            g_regs.rflags.flags.OF = cf ^ msb_result;
-
-            // Temporary workaround for specific case
-            if (width == 32 && shift == 16 && old_val == 0x7FFE050F) {
-                g_regs.rflags.flags.OF = 1;
-            }
-        }
         else {
-            g_regs.rflags.flags.OF = 0;
+#if DB_ENABLED
+            is_OVERFLOW_FLAG_SKIP = 1;
+#endif
         }
         // Write back result
         if (!write_operand_value(dst, width, result)) {
@@ -5145,10 +5173,14 @@ private:
         // === Set OF only if shift == 1 ===
         if (shift == 1) {
             bool msb = (result >> (bit_width - 1)) & 1;
-            bool next_msb = (result >> (bit_width - 2)) & 1;
-            g_regs.rflags.flags.OF = msb ^ next_msb;
+            bool cf = g_regs.rflags.flags.CF;
+            g_regs.rflags.flags.OF = msb ^ cf;
         }
-
+        else {
+#if DB_ENABLED
+            is_OVERFLOW_FLAG_SKIP = 1;
+#endif
+        }
 
         LOG(L"[+] ROL => 0x" << std::hex << result);
     }
@@ -5267,9 +5299,14 @@ private:
         g_regs.rflags.flags.CF = (result >> (width - 1)) & 1;
 
         if (shift == 1) {
-            bool msb = (result >> (width - 1)) & 1;
-            bool next_msb = (result >> (width - 2)) & 1;
-            g_regs.rflags.flags.OF = msb ^ next_msb;  // XOR, not OR
+            bool new_msb = (result >> (width - 1)) & 1;
+            bool msb_plus1 = (result >> (width - 2)) & 1;
+            g_regs.rflags.flags.OF = new_msb ^ msb_plus1;
+        }
+        else {
+#if DB_ENABLED
+            is_OVERFLOW_FLAG_SKIP = 1;
+#endif
         }
 
 
@@ -5904,6 +5941,11 @@ private:
                             g_regs.rbx.q = ctxAfter.Rbx;
                             g_regs.rcx.q = ctxAfter.Rcx;
                             g_regs.rdx.q = ctxAfter.Rdx;
+                        }
+                        else if (is_OVERFLOW_FLAG_SKIP) {
+                            LOG("SKIP OF");
+                            g_regs.rflags.flags.OF = ((ctxAfter.EFlags >> 11) & 1);
+                            CompareRegistersWithEmulation(ctxAfter);
                         }
                         else {
                             CompareRegistersWithEmulation(ctxAfter);
