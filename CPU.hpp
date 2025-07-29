@@ -705,6 +705,8 @@ public:
             { ZYDIS_MNEMONIC_SETNO, &CPU::emulate_setno },
             { ZYDIS_MNEMONIC_SETLE, &CPU::emulate_setle },
             { ZYDIS_MNEMONIC_SETO, &CPU::emulate_seto },
+            { ZYDIS_MNEMONIC_MOVSS, &CPU::emulate_movss },
+            { ZYDIS_MNEMONIC_MOVSQ, &CPU::emulate_movsq },
             
         };
 
@@ -3722,6 +3724,45 @@ private:
         LOG(L"[+] PUNPCKLBW xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
             << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0));
     }
+    void emulate_movss(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+        constexpr uint32_t scalar_width = 32;   
+
+        uint32_t scalar_value;
+
+        if (!read_operand_value(src, scalar_width, scalar_value)) {
+            LOG(L"[!] Failed to read source operand in movss");
+            return;
+        }
+
+        if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            __m128 dst_reg;
+
+
+            if (!read_operand_value(dst, 128, dst_reg)) {
+                LOG(L"[!] Failed to read destination register in movss");
+                return;
+            }
+
+            ((float*)&dst_reg)[0] = *(float*)&scalar_value;
+
+
+            if (!write_operand_value(dst, 128, dst_reg)) {
+                LOG(L"[!] Failed to write destination register in movss");
+                return;
+            }
+        }
+        else {
+
+            if (!write_operand_value(dst, scalar_width, scalar_value)) {
+                LOG(L"[!] Failed to write memory destination in movss");
+                return;
+            }
+        }
+
+        LOG(L"[+] MOVSS executed");
+    }
 
 
     void emulate_shrd(const ZydisDisassembledInstruction* instr) {
@@ -3997,7 +4038,28 @@ private:
 
         LOG(L"[+] CMOVBE executed successfully: dst updated to 0x" << std::hex << value);
     }
+    void emulate_movsq(const ZydisDisassembledInstruction* instr) {
+        uint64_t value = 0;
+        int64_t delta = (g_regs.rflags.flags.DF) ? -8 : 8;
 
+
+        if (!ReadMemory(g_regs.rsi.q, &value, 64)) {
+            LOG(L"[!] Failed to read memory at RSI in MOVSQ");
+            return;
+        }
+
+
+        if (!WriteMemory(g_regs.rdi.q, &value, 64)) {
+            LOG(L"[!] Failed to write memory at RDI in MOVSQ");
+            return;
+        }
+
+
+        g_regs.rsi.q += delta;
+        g_regs.rdi.q += delta;
+
+        LOG(L"[+] MOVSQ executed: copied 8 bytes");
+    }
 
 
     void emulate_cmovb(const ZydisDisassembledInstruction* instr) {
