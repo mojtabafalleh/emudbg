@@ -51,6 +51,7 @@ enum class ThreadState {
     Blocked,
 };
 extern "C" uint64_t __cdecl xgetbv_asm(uint32_t ecx);
+extern "C" uint64_t rdtsc_asm();
 
 
 bool breakpoint_hit;
@@ -567,7 +568,7 @@ public:
 
 #if DB_ENABLED
     memory_mange my_mange;
-    bool is_cpuid, is_OVERFLOW_FLAG_SKIP;
+    bool is_cpuid, is_OVERFLOW_FLAG_SKIP, is_rdtsc;
 #endif
 
 
@@ -707,6 +708,7 @@ public:
             { ZYDIS_MNEMONIC_SETO, &CPU::emulate_seto },
             { ZYDIS_MNEMONIC_MOVSS, &CPU::emulate_movss },
             { ZYDIS_MNEMONIC_MOVSQ, &CPU::emulate_movsq },
+            { ZYDIS_MNEMONIC_RDTSC, &CPU::emulate_rdtsc },
             
         };
 
@@ -761,6 +763,7 @@ public:
             if (disasm.Disassemble(address, buffer, bytesRead)) {
 #if DB_ENABLED
                 is_cpuid = 0;
+                is_rdtsc = 0;
                 is_OVERFLOW_FLAG_SKIP = 0;
                 my_mange.is_write = 0;
                 g_regs.rflags.flags.TF = 1;
@@ -3236,7 +3239,9 @@ private:
     }
 
     void emulate_xgetbv(const ZydisDisassembledInstruction*) {
-
+#if analyze_ENABLED
+        LOG_analyze(GREEN, "[+] xgetbv at [RIP:" << std::hex<< g_regs.rip << "]");
+#endif
         uint64_t XCR;
         XCR = xgetbv_asm(g_regs.rcx.d);
 
@@ -3345,6 +3350,22 @@ private:
             << ZydisRegisterGetString(dst.reg.value));
     }
 
+    void emulate_rdtsc(const ZydisDisassembledInstruction*) {
+#if DB_ENABLED
+        is_rdtsc = 1;
+#endif
+#if analyze_ENABLED
+        LOG_analyze(GREEN, "[+] rdtsc at [RIP:" << std::hex << g_regs.rip << "]");
+#endif
+
+        uint64_t tsc = rdtsc_asm();  
+
+        g_regs.rax.q = tsc & 0xFFFFFFFF;
+        g_regs.rdx.q = (tsc >> 32) & 0xFFFFFFFF;
+
+        LOG(L"[+] RDTSC => RAX=0x" << std::hex << g_regs.rax.q
+            << L", RDX=0x" << g_regs.rdx.q);
+    }
 
     void emulate_cmovz(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
@@ -6002,6 +6023,10 @@ private:
                             g_regs.rax.q = ctxAfter.Rax;
                             g_regs.rbx.q = ctxAfter.Rbx;
                             g_regs.rcx.q = ctxAfter.Rcx;
+                            g_regs.rdx.q = ctxAfter.Rdx;
+                        }
+                        else if (is_rdtsc) {
+                            g_regs.rax.q = ctxAfter.Rax;
                             g_regs.rdx.q = ctxAfter.Rdx;
                         }
                         else if (is_OVERFLOW_FLAG_SKIP) {

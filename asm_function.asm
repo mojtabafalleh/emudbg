@@ -1,5 +1,5 @@
 .code
-
+PUBLIC rdtsc_asm
 PUBLIC xgetbv_asm
 
 ; uint64_t xgetbv_asm(uint32_t ecx)
@@ -15,6 +15,17 @@ xgetbv_asm PROC
     ret
 
 xgetbv_asm ENDP
+
+PUBLIC rdtsc_asm
+
+; uint64_t rdtsc_asm()
+
+rdtsc_asm PROC
+    rdtsc             
+    shl rdx, 32       
+    or rax, rdx        
+    ret
+rdtsc_asm ENDP
 
 
 
