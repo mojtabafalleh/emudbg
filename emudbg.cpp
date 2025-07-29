@@ -52,49 +52,69 @@ int wmain(int argc, wchar_t* argv[]) {
             auto& ld = dbgEvent.u.LoadDll;
             std::wstring loadedName;
 
+
             if (ld.lpImageName && ld.fUnicode) {
-                ULONGLONG ptr = 0;
-                if (ReadProcessMemory(pi.hProcess, (LPCVOID)ld.lpImageName, &ptr, sizeof(ptr), nullptr) && ptr) {
+                ULONGLONG namePtr = 0;
+                if (ReadProcessMemory(pi.hProcess, ld.lpImageName, &namePtr, sizeof(namePtr), nullptr) && namePtr) {
                     wchar_t buffer[MAX_PATH] = {};
-                    if (ReadProcessMemory(pi.hProcess, (LPCVOID)ptr, buffer, sizeof(buffer) - sizeof(wchar_t), nullptr)) {
-                        loadedName = std::wstring(buffer);
-                        std::wstring lowerLoaded = loadedName;
-                        std::transform(lowerLoaded.begin(), lowerLoaded.end(), lowerLoaded.begin(), ::towlower);
-                        std::wstring lowerTarget = targetModuleName;
-                        std::transform(lowerTarget.begin(), lowerTarget.end(), lowerTarget.begin(), ::towlower);
+                    if (ReadProcessMemory(pi.hProcess, (LPCVOID)namePtr, buffer, sizeof(buffer) - sizeof(wchar_t), nullptr)) {
+                        loadedName = buffer;
+                    }
+                }
+            }
 
-                        if (waitForModule && lowerLoaded.find(lowerTarget) != std::wstring::npos) {
-                            LOG(L"[+] Target DLL loaded: " << loadedName);
-                            moduleBase = (uint64_t)ld.lpBaseOfDll;
+            if (!loadedName.empty()) {
+                std::wstring lowerName = loadedName;
+                std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::towlower);
 
-                            uint32_t modEntryRVA = GetEntryPointRVA(buffer);
-                            auto modTLSRVAs = GetTLSCallbackRVAs(buffer);
-                            valid_ranges.emplace_back(moduleBase, moduleBase + optionalHeader.SizeOfImage);
+#if analyze_ENABLED
 
-                            BYTE orig;
-                            if (modEntryRVA) {
-                                uint64_t addr = moduleBase + modEntryRVA;
-                                if (SetBreakpoint(pi.hProcess, addr, orig)) {
-                                    breakpoints[addr] = { orig, 1 };
-                                    LOG(L"[+] Breakpoint set at DLL EntryPoint: 0x" << std::hex << addr);
-                                }
+                if (lowerName.find(L"ntdll.dll") != std::wstring::npos) {
+                    ntdllBase = reinterpret_cast<uint64_t>(ld.lpBaseOfDll);
+                    LOG(L"[+] ntdll.dll loaded at 0x" << std::hex << ntdllBase);
+                }
+#endif
+
+
+                if (waitForModule) {
+                    std::wstring lowerTarget = targetModuleName;
+                    std::transform(lowerTarget.begin(), lowerTarget.end(), lowerTarget.begin(), ::towlower);
+
+                    if (lowerName.find(lowerTarget) != std::wstring::npos) {
+                        moduleBase = reinterpret_cast<uint64_t>(ld.lpBaseOfDll);
+                        LOG(L"[+] Target DLL loaded: " << loadedName);
+
+                        valid_ranges.emplace_back(moduleBase, moduleBase + optionalHeader.SizeOfImage);
+
+
+                        BYTE orig;
+                        uint32_t modEntryRVA = GetEntryPointRVA(loadedName.c_str());
+                        if (modEntryRVA) {
+                            uint64_t addr = moduleBase + modEntryRVA;
+                            if (SetBreakpoint(pi.hProcess, addr, orig)) {
+                                breakpoints[addr] = { orig, 1 };
+                                LOG(L"[+] Breakpoint set at DLL EntryPoint: 0x" << std::hex << addr);
                             }
+                        }
 
-                            for (auto rva : modTLSRVAs) {
-                                uint64_t addr = moduleBase + rva;
-                                if (SetBreakpoint(pi.hProcess, addr, orig)) {
-                                    breakpoints[addr] = { orig, 1 };
-                                    LOG(L"[+] Breakpoint set at DLL TLS Callback: 0x" << std::hex << addr);
-                                }
+
+                        for (auto rva : GetTLSCallbackRVAs(loadedName.c_str())) {
+                            uint64_t addr = moduleBase + rva;
+                            if (SetBreakpoint(pi.hProcess, addr, orig)) {
+                                breakpoints[addr] = { orig, 1 };
+                                LOG(L"[+] Breakpoint set at DLL TLS Callback: 0x" << std::hex << addr);
                             }
                         }
                     }
                 }
             }
 
-            if (ld.hFile) CloseHandle(ld.hFile);
+            if (ld.hFile) {
+                CloseHandle(ld.hFile);
+            }
             break;
         }
+
 
         case CREATE_THREAD_DEBUG_EVENT: {
             CONTEXT ctx = { 0 };

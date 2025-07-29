@@ -62,6 +62,57 @@ IMAGE_OPTIONAL_HEADER64 optionalHeader;
 
 #if analyze_ENABLED
 #include <psapi.h>
+uint64_t ntdllBase = 0;
+static const std::map<uint64_t, std::string> ntdll_directory_offsets = {
+    {0x00000070, "Export Directory RVA"},
+    {0x00000078, "Export Directory Size"},
+
+    {0x00000080, "Import Directory RVA"},
+    {0x00000088, "Import Directory Size"},
+
+    {0x00000090, "Resource Directory RVA"},
+    {0x00000098, "Resource Directory Size"},
+
+    {0x000000A0, "Exception Directory RVA"},
+    {0x000000A8, "Exception Directory Size"},
+
+    {0x000000B0, "Security Directory RVA"},
+    {0x000000B8, "Security Directory Size"},
+
+    {0x000000C0, "Relocation Directory RVA"},
+    {0x000000C8, "Relocation Directory Size"},
+
+    {0x000000D0, "Debug Directory RVA"},
+    {0x000000D8, "Debug Directory Size"},
+
+    {0x000000E0, "Architecture Directory RVA"},
+    {0x000000E8, "Architecture Directory Size"},
+
+    {0x000000F0, "Global Ptr RVA"},
+    {0x000000F8, "Global Ptr Size"},
+
+    {0x00000100, "TLS Directory RVA"},
+    {0x00000108, "TLS Directory Size"},
+
+    {0x00000110, "Load Config Directory RVA"},
+    {0x00000118, "Load Config Directory Size"},
+
+    {0x00000120, "Bound Import Directory RVA"},
+    {0x00000128, "Bound Import Directory Size"},
+
+    {0x00000130, "IAT Directory RVA"},
+    {0x00000138, "IAT Directory Size"},
+
+    {0x00000140, "Delay Import Descriptor RVA"},
+    {0x00000148, "Delay Import Descriptor Size"},
+
+    {0x00000150, "CLR Runtime Header RVA"},
+    {0x00000158, "CLR Runtime Header Size"},
+
+    {0x00000160, "Reserved (Zero) RVA"},
+    {0x00000168, "Reserved (Zero) Size"},
+};
+
 struct ExportedFunctionInfo {
     std::unordered_map<uint64_t, std::string> addrToName;
 };
@@ -1270,6 +1321,37 @@ private:
                 " | RIP: 0x" << std::hex << g_regs.rip
             );
         }
+        // NTDLL Image Data Directory
+        if (ntdllBase && address >= ntdllBase && address < ntdllBase + 0x100000) {
+            std::string description = "Unknown (NTDLL)";
+
+            for (auto it = ntdll_directory_offsets.begin(); it != ntdll_directory_offsets.end(); ++it) {
+                uint64_t vaStart = ntdllBase + it->first;  
+                std::string name = it->second;
+
+                auto next = std::next(it);
+                uint64_t vaEnd = (next != ntdll_directory_offsets.end())
+                    ? ntdllBase + next->first
+                    : (ntdllBase + 0x100000);
+
+                if (address >= vaStart && address < vaEnd) {
+                    uint64_t offset = address - vaStart;
+                    if (offset == 0)
+                        description = name;
+                    else
+                        description = name + " + 0x" + std::to_string(offset);
+                    break;
+                }
+            }
+
+            LOG_analyze(BLUE,
+                "[NTDLL] Reading (" << description.c_str() << ") at 0x" << std::hex << address <<
+                " [RIP: 0x" << std::hex << g_regs.rip << "]");
+        }
+
+
+
+
 #endif
 
         SIZE_T bytesRead;
