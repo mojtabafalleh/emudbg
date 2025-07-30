@@ -83,9 +83,14 @@ int wmain(int argc, wchar_t* argv[]) {
                     if (lowerName.find(lowerTarget) != std::wstring::npos) {
                         moduleBase = reinterpret_cast<uint64_t>(ld.lpBaseOfDll);
                         LOG(L"[+] Target DLL loaded: " << loadedName);
-
-                        valid_ranges.emplace_back(moduleBase, moduleBase + optionalHeader.SizeOfImage);
-
+                        IMAGE_OPTIONAL_HEADER optHdr = {};
+                        if (ReadOptionalHeader(pi.hProcess, moduleBase, optHdr)) {
+                            valid_ranges.emplace_back(moduleBase, moduleBase + optHdr.SizeOfImage);
+                            LOG(L"[DEBUG] Added range: 0x" << std::hex << moduleBase << L" - 0x" << (moduleBase + optHdr.SizeOfImage));
+                        }
+                        else {
+                            LOG(L"[WARN] Failed to read optional header for: " << loadedName);
+                        }
 
                         BYTE orig;
                         uint32_t modEntryRVA = GetEntryPointRVA(loadedName.c_str());
@@ -133,7 +138,6 @@ int wmain(int argc, wchar_t* argv[]) {
             auto& procInfo = dbgEvent.u.CreateProcessInfo;
             baseAddress = reinterpret_cast<uint64_t>(procInfo.lpBaseOfImage);
             valid_ranges.emplace_back(baseAddress, baseAddress + optionalHeader.SizeOfImage);
-
 
             LOG(L"[+] Process created. Base address: 0x" << std::hex << baseAddress);
 

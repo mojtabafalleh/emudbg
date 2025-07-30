@@ -14,7 +14,7 @@
 
 //------------------------------------------
 //LOG analyze 
-#define analyze_ENABLED 1
+#define analyze_ENABLED 0
 //LOG everything
 #define LOG_ENABLED 0
 //test with real cpu
@@ -528,6 +528,19 @@ struct memory_mange
 };
 // ------------------- PE Helpers -------------------
 
+bool ReadOptionalHeader(HANDLE hProcess, uint64_t moduleBase, IMAGE_OPTIONAL_HEADER& out) {
+    IMAGE_DOS_HEADER dos = {};
+    if (!ReadProcessMemory(hProcess, (LPCVOID)moduleBase, &dos, sizeof(dos), nullptr) || dos.e_magic != IMAGE_DOS_SIGNATURE)
+        return false;
+
+    IMAGE_NT_HEADERS64 nthdrs = {};
+    if (!ReadProcessMemory(hProcess, (LPCVOID)(moduleBase + dos.e_lfanew), &nthdrs, sizeof(nthdrs), nullptr))
+        return false;
+
+    out = nthdrs.OptionalHeader;
+    return true;
+}
+
 uint64_t GetTEBAddress(HANDLE hThread) {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     if (!ntdll) return 0;
@@ -904,6 +917,7 @@ public:
 #if analyze_ENABLED
                         LOG_analyze( CYAN ,  GetExportedFunctionNameByAddress(address).c_str());
 #endif
+
                         uint64_t value = 0;
                         ReadMemory(g_regs.rsp.q, &value, 8);
                         return value;
