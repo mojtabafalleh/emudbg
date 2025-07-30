@@ -52,74 +52,56 @@ int wmain(int argc, wchar_t* argv[]) {
             auto& ld = dbgEvent.u.LoadDll;
             std::wstring loadedName;
 
-
             if (ld.lpImageName && ld.fUnicode) {
-                ULONGLONG namePtr = 0;
-                if (ReadProcessMemory(pi.hProcess, ld.lpImageName, &namePtr, sizeof(namePtr), nullptr) && namePtr) {
+                ULONGLONG ptr = 0;
+                if (ReadProcessMemory(pi.hProcess, (LPCVOID)ld.lpImageName, &ptr, sizeof(ptr), nullptr) && ptr) {
                     wchar_t buffer[MAX_PATH] = {};
-                    if (ReadProcessMemory(pi.hProcess, (LPCVOID)namePtr, buffer, sizeof(buffer) - sizeof(wchar_t), nullptr)) {
-                        loadedName = buffer;
-                    }
-                }
-            }
-
-            if (!loadedName.empty()) {
-                std::wstring lowerName = loadedName;
-                std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::towlower);
+                    if (ReadProcessMemory(pi.hProcess, (LPCVOID)ptr, buffer, sizeof(buffer) - sizeof(wchar_t), nullptr)) {
+                        loadedName = std::wstring(buffer);
+                        std::wstring lowerLoaded = loadedName;
+                        std::transform(lowerLoaded.begin(), lowerLoaded.end(), lowerLoaded.begin(), ::towlower);
+                        std::wstring lowerTarget = targetModuleName;
+                        std::transform(lowerTarget.begin(), lowerTarget.end(), lowerTarget.begin(), ::towlower);
 
 #if analyze_ENABLED
 
-                if (lowerName.find(L"ntdll.dll") != std::wstring::npos) {
-                    ntdllBase = reinterpret_cast<uint64_t>(ld.lpBaseOfDll);
-                    LOG(L"[+] ntdll.dll loaded at 0x" << std::hex << ntdllBase);
-                }
+                        if (lowerLoaded.find(L"ntdll.dll") != std::wstring::npos) {
+                            ntdllBase = reinterpret_cast<uint64_t>(ld.lpBaseOfDll);
+                            LOG(L"[+] ntdll.dll loaded at 0x" << std::hex << ntdllBase);
+                        }
 #endif
+                        if (waitForModule && lowerLoaded.find(lowerTarget) != std::wstring::npos) {
+                            LOG(L"[+] Target DLL loaded: " << loadedName);
+                            moduleBase = (uint64_t)ld.lpBaseOfDll;
 
+                            uint32_t modEntryRVA = GetEntryPointRVA(buffer);
+                            auto modTLSRVAs = GetTLSCallbackRVAs(buffer);
+                            valid_ranges.emplace_back(moduleBase, moduleBase + optionalHeader.SizeOfImage);
 
-                if (waitForModule) {
-                    std::wstring lowerTarget = targetModuleName;
-                    std::transform(lowerTarget.begin(), lowerTarget.end(), lowerTarget.begin(), ::towlower);
-
-                    if (lowerName.find(lowerTarget) != std::wstring::npos) {
-                        moduleBase = reinterpret_cast<uint64_t>(ld.lpBaseOfDll);
-                        LOG(L"[+] Target DLL loaded: " << loadedName);
-                        IMAGE_OPTIONAL_HEADER optHdr = {};
-                        if (ReadOptionalHeader(pi.hProcess, moduleBase, optHdr)) {
-                            valid_ranges.emplace_back(moduleBase, moduleBase + optHdr.SizeOfImage);
-                            LOG(L"[DEBUG] Added range: 0x" << std::hex << moduleBase << L" - 0x" << (moduleBase + optHdr.SizeOfImage));
-                        }
-                        else {
-                            LOG(L"[WARN] Failed to read optional header for: " << loadedName);
-                        }
-
-                        BYTE orig;
-                        uint32_t modEntryRVA = GetEntryPointRVA(loadedName.c_str());
-                        if (modEntryRVA) {
-                            uint64_t addr = moduleBase + modEntryRVA;
-                            if (SetBreakpoint(pi.hProcess, addr, orig)) {
-                                breakpoints[addr] = { orig, 1 };
-                                LOG(L"[+] Breakpoint set at DLL EntryPoint: 0x" << std::hex << addr);
+                            BYTE orig;
+                            if (modEntryRVA) {
+                                uint64_t addr = moduleBase + modEntryRVA;
+                                if (SetBreakpoint(pi.hProcess, addr, orig)) {
+                                    breakpoints[addr] = { orig, 1 };
+                                    LOG(L"[+] Breakpoint set at DLL EntryPoint: 0x" << std::hex << addr);
+                                }
                             }
-                        }
 
-
-                        for (auto rva : GetTLSCallbackRVAs(loadedName.c_str())) {
-                            uint64_t addr = moduleBase + rva;
-                            if (SetBreakpoint(pi.hProcess, addr, orig)) {
-                                breakpoints[addr] = { orig, 1 };
-                                LOG(L"[+] Breakpoint set at DLL TLS Callback: 0x" << std::hex << addr);
+                            for (auto rva : modTLSRVAs) {
+                                uint64_t addr = moduleBase + rva;
+                                if (SetBreakpoint(pi.hProcess, addr, orig)) {
+                                    breakpoints[addr] = { orig, 1 };
+                                    LOG(L"[+] Breakpoint set at DLL TLS Callback: 0x" << std::hex << addr);
+                                }
                             }
                         }
                     }
                 }
             }
 
-            if (ld.hFile) {
-                CloseHandle(ld.hFile);
-            }
+            if (ld.hFile) CloseHandle(ld.hFile);
             break;
         }
-
 
         case CREATE_THREAD_DEBUG_EVENT: {
             CONTEXT ctx = { 0 };
@@ -138,6 +120,7 @@ int wmain(int argc, wchar_t* argv[]) {
             auto& procInfo = dbgEvent.u.CreateProcessInfo;
             baseAddress = reinterpret_cast<uint64_t>(procInfo.lpBaseOfImage);
             valid_ranges.emplace_back(baseAddress, baseAddress + optionalHeader.SizeOfImage);
+
 
             LOG(L"[+] Process created. Base address: 0x" << std::hex << baseAddress);
 
