@@ -14,9 +14,9 @@
 
 //------------------------------------------
 //LOG analyze 
-#define analyze_ENABLED 0
+#define analyze_ENABLED 1
 //LOG everything
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 //test with real cpu
 #define DB_ENABLED 0
 //------------------------------------------
