@@ -14,7 +14,7 @@
 
 //------------------------------------------
 //LOG analyze 
-#define analyze_ENABLED 1
+#define analyze_ENABLED 0
 //LOG everything
 #define LOG_ENABLED 0
 //test with real cpu
@@ -30,7 +30,7 @@
 
 #include <windows.h>
 #include <iostream>
-
+uint64_t SGDT_Address;
 
 #pragma pack(push, 1)
 struct GDTR_Packed_6 {
@@ -543,6 +543,14 @@ struct memory_mange
 };
 // ------------------- PE Helpers -------------------
 
+bool IsInEmulationRange(uint64_t addr) {
+    for (const auto& range : valid_ranges) {
+        if (addr >= range.first && addr <= range.second)
+            return true;
+    }
+    return false;
+}
+
 uint64_t GetTEBAddress(HANDLE hThread) {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     if (!ntdll) return 0;
@@ -558,39 +566,63 @@ uint64_t GetTEBAddress(HANDLE hThread) {
 
     return reinterpret_cast<uint64_t>(tbi.TebBaseAddress);
 }
-GDTR GetRemoteGDTR(HANDLE hProcess) {
 
-    LPVOID remoteBuf = VirtualAllocEx(hProcess, NULL, sizeof(GDTR), MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+uint64_t InjectRemoteSGDT(HANDLE hProcess)
+{
+    const SIZE_T shellcodeSize = 8;           
+    const SIZE_T gdtrSize = sizeof(GDTR);
+    const SIZE_T totalSize = shellcodeSize + gdtrSize;
+
+
+    LPVOID remoteBuf = VirtualAllocEx(hProcess, NULL, totalSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!remoteBuf) return 0;
+
 
     uint8_t shellcode[] = {
-        0x0F, 0x01, 0x15, 0, 0, 0, 0, 0, // sgdt [rip + offset]
-        0xC3                             // ret
+        0x0F, 0x01, 0x15, 0, 0, 0, 0,  // sgdt [rip+offset32]
+        0xCC                           // int3
     };
 
-    uint64_t rip_sgdt = reinterpret_cast<uint64_t>(remoteBuf) + sizeof(shellcode);
-    int32_t rel = static_cast<int32_t>((reinterpret_cast<uint64_t>(remoteBuf) - (rip_sgdt - 7)));
 
-    memcpy(&shellcode[3], &rel, sizeof(rel));
+    uint64_t ripAfterInstr = reinterpret_cast<uint64_t>(remoteBuf) + 7; 
+    uint64_t gdtrAddress = reinterpret_cast<uint64_t>(remoteBuf) + shellcodeSize;
+
+    int32_t offset = static_cast<int32_t>(gdtrAddress - ripAfterInstr);
+    memcpy(&shellcode[3], &offset, sizeof(offset));
 
     SIZE_T written = 0;
-    WriteProcessMemory(hProcess, remoteBuf, shellcode, sizeof(shellcode), &written);
+    if (!WriteProcessMemory(hProcess, remoteBuf, shellcode, sizeof(shellcode), &written) || written != sizeof(shellcode)) {
+        VirtualFreeEx(hProcess, remoteBuf, 0, MEM_RELEASE);
+        return 0;
+    }
 
 
     HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0,
         reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteBuf),
         NULL, 0, NULL);
 
-    WaitForSingleObject(hThread, INFINITE);
+    if (!hThread) {
+        VirtualFreeEx(hProcess, remoteBuf, 0, MEM_RELEASE);
+        return 0;
+    }
+
     CloseHandle(hThread);
 
 
+    return reinterpret_cast<uint64_t>(remoteBuf) + shellcodeSize - 1;
+}
+void ReadRemoteGDTR(HANDLE hProcess, uint64_t int3_address)
+{
     GDTR result = {};
+
+    uint64_t gdtr_address = int3_address + 1;
+
     SIZE_T read = 0;
-    ReadProcessMemory(hProcess, remoteBuf, &result, sizeof(result), &read);
+    if (!ReadProcessMemory(hProcess, reinterpret_cast<LPCVOID>(gdtr_address), &result, sizeof(result), &read) || read != sizeof(result)) {
+        wprintf(L"[!] Failed to read GDTR from remote process\n");
+    }
 
-    VirtualFreeEx(hProcess, remoteBuf, 0, MEM_RELEASE);
-
-    return result;
+    gdtr =  result;
 }
 
 
@@ -815,6 +847,7 @@ public:
             { ZYDIS_MNEMONIC_CVTTSS2SI, &CPU::emulate_cvttss2si },
             { ZYDIS_MNEMONIC_CVTSI2SS, &CPU::emulate_cvtsi2ss },
             { ZYDIS_MNEMONIC_SGDT, &CPU::emulate_sgdt },
+            { ZYDIS_MNEMONIC_TZCNT, &CPU::emulate_tzcnt },
             
         };
 
@@ -4517,6 +4550,34 @@ private:
         }
 
     }
+    void emulate_tzcnt(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0], src = instr->operands[1];
+        uint8_t width = instr->info.operand_width;
+        uint64_t val = 0;
+
+        if (!read_operand_value(src, width, val)) {
+            LOG(L"[!] Failed to read source operand");
+            return;
+        }
+
+        uint64_t result = 0;
+
+        if (val == 0) {
+            result = width; 
+        }
+        else {
+
+            while ((val & 1) == 0) {
+                result++;
+                val >>= 1;
+            }
+        }
+
+
+        if (!write_operand_value(dst, width, result)) {
+            LOG(L"[!] Failed to write destination operand");
+        }
+    }
 
     void emulate_sub(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
@@ -6391,14 +6452,6 @@ private:
     }
 
 #endif DB_ENABLED
-
-    bool IsInEmulationRange(uint64_t addr) {
-        for (const auto& range : valid_ranges) {
-            if (addr >= range.first && addr <= range.second)
-                return true;
-        }
-        return false;
-    }
 
 
 };
