@@ -28,32 +28,13 @@
 #define LOG(x)
 #endif
 
-#include <windows.h>
-#include <iostream>
-uint64_t SGDT_Address;
 
-#pragma pack(push, 1)
-struct GDTR_Packed_6 {
-    uint16_t limit;
-    uint32_t base;
-};
-
-struct GDTR_Packed_10 {
-    uint16_t limit;
-    uint64_t base;
-};
-#pragma pack(pop)
 
 
 struct BreakpointInfo {
     BYTE originalByte;
     int remainingHits;  
 };
-struct GDTR {
-    uint16_t limit;
-    uint64_t base;
-};
-GDTR gdtr;
 
 enum class ThreadState {
     Unknown,
@@ -567,63 +548,6 @@ uint64_t GetTEBAddress(HANDLE hThread) {
     return reinterpret_cast<uint64_t>(tbi.TebBaseAddress);
 }
 
-uint64_t InjectRemoteSGDT(HANDLE hProcess)
-{
-    const SIZE_T shellcodeSize = 8;           
-    const SIZE_T gdtrSize = sizeof(GDTR);
-    const SIZE_T totalSize = shellcodeSize + gdtrSize;
-
-
-    LPVOID remoteBuf = VirtualAllocEx(hProcess, NULL, totalSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!remoteBuf) return 0;
-
-
-    uint8_t shellcode[] = {
-        0x0F, 0x01, 0x15, 0, 0, 0, 0,  // sgdt [rip+offset32]
-        0xCC                           // int3
-    };
-
-
-    uint64_t ripAfterInstr = reinterpret_cast<uint64_t>(remoteBuf) + 7; 
-    uint64_t gdtrAddress = reinterpret_cast<uint64_t>(remoteBuf) + shellcodeSize;
-
-    int32_t offset = static_cast<int32_t>(gdtrAddress - ripAfterInstr);
-    memcpy(&shellcode[3], &offset, sizeof(offset));
-
-    SIZE_T written = 0;
-    if (!WriteProcessMemory(hProcess, remoteBuf, shellcode, sizeof(shellcode), &written) || written != sizeof(shellcode)) {
-        VirtualFreeEx(hProcess, remoteBuf, 0, MEM_RELEASE);
-        return 0;
-    }
-
-
-    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0,
-        reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteBuf),
-        NULL, 0, NULL);
-
-    if (!hThread) {
-        VirtualFreeEx(hProcess, remoteBuf, 0, MEM_RELEASE);
-        return 0;
-    }
-
-    CloseHandle(hThread);
-
-
-    return reinterpret_cast<uint64_t>(remoteBuf) + shellcodeSize - 1;
-}
-void ReadRemoteGDTR(HANDLE hProcess, uint64_t int3_address)
-{
-    GDTR result = {};
-
-    uint64_t gdtr_address = int3_address + 1;
-
-    SIZE_T read = 0;
-    if (!ReadProcessMemory(hProcess, reinterpret_cast<LPCVOID>(gdtr_address), &result, sizeof(result), &read) || read != sizeof(result)) {
-        wprintf(L"[!] Failed to read GDTR from remote process\n");
-    }
-
-    gdtr =  result;
-}
 
 
 std::vector<uint32_t> GetTLSCallbackRVAs(const std::wstring& exePath) {
@@ -846,7 +770,6 @@ public:
             { ZYDIS_MNEMONIC_COMISS, &CPU::emulate_comiss },
             { ZYDIS_MNEMONIC_CVTTSS2SI, &CPU::emulate_cvttss2si },
             { ZYDIS_MNEMONIC_CVTSI2SS, &CPU::emulate_cvtsi2ss },
-            { ZYDIS_MNEMONIC_SGDT, &CPU::emulate_sgdt },
             { ZYDIS_MNEMONIC_TZCNT, &CPU::emulate_tzcnt },
             
         };
@@ -932,6 +855,13 @@ public:
                     LOG("[+] syscall in : " << g_regs.rip << " rax : " << g_regs.rax.q);
                     return g_regs.rip + instr.length;
                 }
+                if (instr.mnemonic == ZYDIS_MNEMONIC_SGDT)
+                {
+                    LOG_analyze(BLUE, "[+] SGDT executed at: 0x" << std::hex << g_regs.rip << " — GDTR is being read");
+                    LOG("[+] SGDT executed at: 0x" << std::hex << g_regs.rip << " — reading GDTR");
+                    return g_regs.rip + instr.length;
+                }
+
 
                 auto it = dispatch_table.find(instr.mnemonic);
                 if (it != dispatch_table.end()) {
@@ -3878,42 +3808,6 @@ private:
 
         LOG(L"[+] JNP to => 0x" << std::hex << g_regs.rip);
     }
-    void emulate_sgdt(const ZydisDisassembledInstruction* instr) {
-        const auto& dst = instr->operands[0];
-#if analyze_ENABLED
-        LOG_analyze(WHITE, "sgdt  at : 0x" << std::hex << g_regs.rip);
-#endif
-        if (dst.type != ZYDIS_OPERAND_TYPE_MEMORY) {
-            LOG(L"[!] SGDT destination must be a memory operand");
-            return;
-        }
-
-        if (instr->info.machine_mode == ZYDIS_MACHINE_MODE_LONG_64) {
-            GDTR_Packed_10 packed = {};
-            packed.limit = gdtr.limit;
-            packed.base = gdtr.base;
-
-            if (!write_operand_value(dst, 80, packed)) {
-                LOG(L"[!] Failed to write 10-byte SGDT to memory");
-                return;
-            }
-            LOG(L"[+] SGDT (64-bit) -> limit=0x" << std::hex << packed.limit
-                << L", base=0x" << packed.base);
-        }
-        else {
-            GDTR_Packed_6 packed = {};
-            packed.limit = gdtr.limit;
-            packed.base = static_cast<uint32_t>(gdtr.base); // truncate for 32-bit
-
-            if (!write_operand_value(dst, 48, packed)) {
-                LOG(L"[!] Failed to write 6-byte SGDT to memory");
-                return;
-            }
-            LOG(L"[+] SGDT (32-bit) -> limit=0x" << std::hex << packed.limit
-                << L", base=0x" << packed.base);
-        }
-    }
-
 
 
     void emulate_movsxd(const ZydisDisassembledInstruction* instr) {

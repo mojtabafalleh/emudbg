@@ -152,7 +152,6 @@ int wmain(int argc, wchar_t* argv[]) {
             auto& procInfo = dbgEvent.u.CreateProcessInfo;
             baseAddress = reinterpret_cast<uint64_t>(procInfo.lpBaseOfImage);
             valid_ranges.emplace_back(baseAddress, baseAddress + optionalHeader.SizeOfImage);
-            SGDT_Address = InjectRemoteSGDT(pi.hProcess);
 
             LOG(L"[+] Process created. Base address: 0x" << std::hex << baseAddress);
 
@@ -235,26 +234,34 @@ int wmain(int argc, wchar_t* argv[]) {
                     if (hThread) CloseHandle(hThread);
                     breakpoint_hit = 0;
                 }
-                else if (exAddr == SGDT_Address) {
-                    ReadRemoteGDTR(pi.hProcess,exAddr);
-                }
+            
                 break;
 
             case EXCEPTION_ACCESS_VIOLATION:
                 LOG(L"[!] Access Violation at 0x" << std::hex << exAddr);
                 exit(0);
+                break;
             case EXCEPTION_ILLEGAL_INSTRUCTION:
                 LOG(L"[!] Illegal instruction at 0x" << std::hex << exAddr);
                 exit(0);
+                break;
             case EXCEPTION_STACK_OVERFLOW:
                 LOG(L"[!] Stack overflow at 0x" << std::hex << exAddr);
                 exit(0);
+                break;
             case EXCEPTION_INT_DIVIDE_BY_ZERO:
                 LOG(L"[!] Divide by zero at 0x" << std::hex << exAddr);
                 exit(0);
+                break;
+            case EXCEPTION_PRIV_INSTRUCTION:
+                LOG(L"[!] Privileged instruction exception at 0x" << std::hex << exAddr);
+                break;
+
+
             default:
                 LOG(L"[!] Unhandled exception 0x" << std::hex << exceptionCode << L" at 0x" << exAddr);
                 exit(0);
+                break;
             }
 
             break;
