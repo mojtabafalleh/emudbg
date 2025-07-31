@@ -16,7 +16,7 @@
 //LOG analyze 
 #define analyze_ENABLED 0
 //LOG everything
-#define LOG_ENABLED 0
+#define LOG_ENABLED 1
 //test with real cpu
 #define DB_ENABLED 0
 //------------------------------------------
@@ -1158,7 +1158,7 @@ public:
         }
 
         if (!SetThreadContext(hThread, &ctx)) {
-            std::wcerr << L"[!] Failed to set thread context" << std::endl;
+            LOG(L"[!] Failed to set thread context");
             return false;
         }
 

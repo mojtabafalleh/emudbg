@@ -119,7 +119,7 @@ int wmain(int argc, wchar_t* argv[]) {
                     LOG(L"[+] Read value from [RDX]: " << std::hex << address);
                 }
 
-                if (IsInEmulationRange) {
+                if (IsInEmulationRange(address)) {
                     if (breakpoints.find(address) == breakpoints.end()) {
                         CPU cpu(hThread);
                         BYTE orig;
@@ -152,9 +152,10 @@ int wmain(int argc, wchar_t* argv[]) {
             auto& procInfo = dbgEvent.u.CreateProcessInfo;
             baseAddress = reinterpret_cast<uint64_t>(procInfo.lpBaseOfImage);
             valid_ranges.emplace_back(baseAddress, baseAddress + optionalHeader.SizeOfImage);
-
+            for (const auto& range : valid_ranges) {
+                LOG(L"[dbg] Valid range: 0x" << std::hex << range.first << L" - 0x" << range.second);
+            }
             LOG(L"[+] Process created. Base address: 0x" << std::hex << baseAddress);
-
             HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
             if (hThread) {
                 cpuThreads.emplace(dbgEvent.dwThreadId, CPU(hThread));
@@ -257,10 +258,13 @@ int wmain(int argc, wchar_t* argv[]) {
                 LOG(L"[!] Privileged instruction exception at 0x" << std::hex << exAddr);
                 break;
 
+            case 0x406d1388:  // DBG_PRINTEXCEPTION_C
+                LOG(L"[i] Debug string output exception at 0x" << std::hex << exAddr);
+                break;
 
             default:
                 LOG(L"[!] Unhandled exception 0x" << std::hex << exceptionCode << L" at 0x" << exAddr);
-                exit(0);
+                //exit(0);
                 break;
             }
 
