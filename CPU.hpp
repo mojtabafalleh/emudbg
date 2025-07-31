@@ -32,13 +32,28 @@
 #include <iostream>
 
 
+#pragma pack(push, 1)
+struct GDTR_Packed_6 {
+    uint16_t limit;
+    uint32_t base;
+};
+
+struct GDTR_Packed_10 {
+    uint16_t limit;
+    uint64_t base;
+};
+#pragma pack(pop)
 
 
 struct BreakpointInfo {
     BYTE originalByte;
     int remainingHits;  
 };
-
+struct GDTR {
+    uint16_t limit;
+    uint64_t base;
+};
+GDTR gdtr;
 
 enum class ThreadState {
     Unknown,
@@ -543,6 +558,41 @@ uint64_t GetTEBAddress(HANDLE hThread) {
 
     return reinterpret_cast<uint64_t>(tbi.TebBaseAddress);
 }
+GDTR GetRemoteGDTR(HANDLE hProcess) {
+
+    LPVOID remoteBuf = VirtualAllocEx(hProcess, NULL, sizeof(GDTR), MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+    uint8_t shellcode[] = {
+        0x0F, 0x01, 0x15, 0, 0, 0, 0, 0, // sgdt [rip + offset]
+        0xC3                             // ret
+    };
+
+    uint64_t rip_sgdt = reinterpret_cast<uint64_t>(remoteBuf) + sizeof(shellcode);
+    int32_t rel = static_cast<int32_t>((reinterpret_cast<uint64_t>(remoteBuf) - (rip_sgdt - 7)));
+
+    memcpy(&shellcode[3], &rel, sizeof(rel));
+
+    SIZE_T written = 0;
+    WriteProcessMemory(hProcess, remoteBuf, shellcode, sizeof(shellcode), &written);
+
+
+    HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0,
+        reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteBuf),
+        NULL, 0, NULL);
+
+    WaitForSingleObject(hThread, INFINITE);
+    CloseHandle(hThread);
+
+
+    GDTR result = {};
+    SIZE_T read = 0;
+    ReadProcessMemory(hProcess, remoteBuf, &result, sizeof(result), &read);
+
+    VirtualFreeEx(hProcess, remoteBuf, 0, MEM_RELEASE);
+
+    return result;
+}
+
 
 std::vector<uint32_t> GetTLSCallbackRVAs(const std::wstring& exePath) {
     std::vector<uint32_t> tlsCallbacks;
@@ -760,6 +810,11 @@ public:
             { ZYDIS_MNEMONIC_MOVSS, &CPU::emulate_movss },
             { ZYDIS_MNEMONIC_MOVSQ, &CPU::emulate_movsq },
             { ZYDIS_MNEMONIC_RDTSC, &CPU::emulate_rdtsc },
+            { ZYDIS_MNEMONIC_MULSS, &CPU::emulate_mulss },
+            { ZYDIS_MNEMONIC_COMISS, &CPU::emulate_comiss },
+            { ZYDIS_MNEMONIC_CVTTSS2SI, &CPU::emulate_cvttss2si },
+            { ZYDIS_MNEMONIC_CVTSI2SS, &CPU::emulate_cvtsi2ss },
+            { ZYDIS_MNEMONIC_SGDT, &CPU::emulate_sgdt },
             
         };
 
@@ -780,7 +835,7 @@ public:
     void DisableTrapFlag() {
         CONTEXT ctx = { 0 };
         ctx.ContextFlags = CONTEXT_ALL;
-
+        
         if (GetThreadContext(hThread, &ctx)) {
             ctx.EFlags &= ~0x100; // Clear Trap Flag (bit 8)
             SetThreadContext(hThread, &ctx);
@@ -919,7 +974,6 @@ public:
 
         return -1;
     }
-
 
 
 
@@ -1150,6 +1204,7 @@ public:
 
 private:
     // ------------------- Register State -------------------
+
     union GPR {
         uint64_t q;
         uint32_t d;
@@ -1901,6 +1956,31 @@ private:
             break;
         }
     }
+    void emulate_mulss(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+
+        __m128 dst_val, src_val;
+        if (!read_operand_value(dst, 128, dst_val) || !read_operand_value(src, 128, src_val)) {
+            LOG(L"[!] Failed to read operands for MULSS");
+            return;
+        }
+
+        // Load lowest 32 bits (scalar floats)
+        float a = dst_val.m128_f32[0];
+        float b = src_val.m128_f32[0];
+
+        float result_scalar = a * b;
+
+        // Write back only the lowest float to dst, keep upper bits
+        dst_val.m128_f32[0] = result_scalar;
+
+        write_operand_value(dst, 128, dst_val);
+
+        LOG(L"[+] MULSS xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
+            << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0)
+            << L" => " << std::dec << result_scalar);
+    }
 
 
     void emulate_scasd(const ZydisDisassembledInstruction* instr) {
@@ -2321,6 +2401,42 @@ private:
         LOG(L"[+] SETNL => " << std::hex << static_cast<int>(value));
     }
 
+    void emulate_comiss(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+
+        __m128 dst_val, src_val;
+        if (!read_operand_value(dst, 128, dst_val) || !read_operand_value(src, 128, src_val)) {
+            LOG(L"[!] Failed to read operands for COMISS");
+            return;
+        }
+
+        float a = dst_val.m128_f32[0];
+        float b = src_val.m128_f32[0];
+
+        bool unordered = std::isnan(a) || std::isnan(b);
+
+        g_regs.rflags.flags.ZF = 0;
+        g_regs.rflags.flags.CF = 0;
+        g_regs.rflags.flags.PF = 0;
+
+        if (unordered) {
+            g_regs.rflags.flags.PF = 1;
+        }
+        else if (a == b) {
+            g_regs.rflags.flags.ZF = 1;
+        }
+        else if (a < b) {
+            g_regs.rflags.flags.CF = 1;
+        }
+
+        LOG(L"[+] COMISS xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
+            << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0)
+            << L" => a=" << a << L", b=" << b
+            << L", ZF=" << g_regs.rflags.flags.ZF
+            << L", CF=" << g_regs.rflags.flags.CF
+            << L", PF=" << g_regs.rflags.flags.PF);
+    }
 
     void emulate_cdqe(const ZydisDisassembledInstruction* instr) {
 
@@ -2336,6 +2452,41 @@ private:
         g_regs.rdi.q = g_regs.rflags.flags.DF ? (g_regs.rdi.q - 8) : (g_regs.rdi.q + 8);
 
         LOG(L"[+] STOSQ => Wrote 0x" << std::hex << g_regs.rax.q << L" to [RDI], new RDI = 0x" << g_regs.rdi.q);
+    }
+    void emulate_cvttss2si(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+
+        __m128 src_val;
+        if (!read_operand_value(src, 128, src_val)) {
+            LOG(L"[!] Failed to read operand for CVTTSS2SI");
+            return;
+        }
+
+        float fval = src_val.m128_f32[0];
+
+        uint64_t result = 0;
+        int width = dst.size;  // 32 or 64 bits
+
+        if (std::isnan(fval) ||
+            fval > (width == 64 ? static_cast<float>(INT64_MAX) : static_cast<float>(INT32_MAX)) ||
+            fval < (width == 64 ? static_cast<float>(INT64_MIN) : static_cast<float>(INT32_MIN))) {
+            // Invalid conversion -> set to INT_MIN
+            result = (width == 64) ? 0x8000000000000000ULL : 0x80000000UL;
+        }
+        else {
+            if (width == 64) {
+                result = static_cast<int64_t>(fval);  // Truncate
+            }
+            else {
+                result = static_cast<int32_t>(fval);  // Truncate
+            }
+        }
+
+        write_operand_value(dst, width, result);
+
+        LOG(L"[+] CVTTSS2SI " << (width == 64 ? L"(qword)" : L"(dword)")
+            << " => " << std::dec << fval << " -> " << result);
     }
 
 
@@ -3694,6 +3845,42 @@ private:
 
         LOG(L"[+] JNP to => 0x" << std::hex << g_regs.rip);
     }
+    void emulate_sgdt(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+#if analyze_ENABLED
+        LOG_analyze(WHITE, "sgdt  at : 0x" << std::hex << g_regs.rip);
+#endif
+        if (dst.type != ZYDIS_OPERAND_TYPE_MEMORY) {
+            LOG(L"[!] SGDT destination must be a memory operand");
+            return;
+        }
+
+        if (instr->info.machine_mode == ZYDIS_MACHINE_MODE_LONG_64) {
+            GDTR_Packed_10 packed = {};
+            packed.limit = gdtr.limit;
+            packed.base = gdtr.base;
+
+            if (!write_operand_value(dst, 80, packed)) {
+                LOG(L"[!] Failed to write 10-byte SGDT to memory");
+                return;
+            }
+            LOG(L"[+] SGDT (64-bit) -> limit=0x" << std::hex << packed.limit
+                << L", base=0x" << packed.base);
+        }
+        else {
+            GDTR_Packed_6 packed = {};
+            packed.limit = gdtr.limit;
+            packed.base = static_cast<uint32_t>(gdtr.base); // truncate for 32-bit
+
+            if (!write_operand_value(dst, 48, packed)) {
+                LOG(L"[!] Failed to write 6-byte SGDT to memory");
+                return;
+            }
+            LOG(L"[+] SGDT (32-bit) -> limit=0x" << std::hex << packed.limit
+                << L", base=0x" << packed.base);
+        }
+    }
+
 
 
     void emulate_movsxd(const ZydisDisassembledInstruction* instr) {
@@ -3716,6 +3903,42 @@ private:
         LOG(L"[+] MOVSXD => " << std::hex << value);
 
         write_operand_value(dst, 64, static_cast<uint64_t>(value));
+    }
+    void emulate_cvtsi2ss(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];  // XMM register
+        const auto& src = instr->operands[1];  // Integer (reg/mem)
+
+        __m128 dst_val;
+        uint64_t src_val = 0;
+
+        if (!read_operand_value(dst, 128, dst_val)) {
+            LOG(L"[!] Failed to read destination XMM for CVTSI2SS");
+            return;
+        }
+
+        if (!read_operand_value(src, src.size, src_val)) {
+            LOG(L"[!] Failed to read source integer for CVTSI2SS");
+            return;
+        }
+
+        float result;
+        if (src.size == 32) {
+            result = static_cast<float>(static_cast<int32_t>(src_val));
+        }
+        else if (src.size == 64) {
+            result = static_cast<float>(static_cast<int64_t>(src_val));
+        }
+        else {
+            LOG(L"[!] Unsupported integer size for CVTSI2SS: " << src.size);
+            return;
+        }
+
+        dst_val.m128_f32[0] = result;
+
+        write_operand_value(dst, 128, dst_val);
+
+        LOG(L"[+] CVTSI2SS -> int: " << std::dec << src_val
+            << L", float: " << result);
     }
 
 

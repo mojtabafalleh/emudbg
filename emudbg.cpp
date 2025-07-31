@@ -121,7 +121,7 @@ int wmain(int argc, wchar_t* argv[]) {
             baseAddress = reinterpret_cast<uint64_t>(procInfo.lpBaseOfImage);
             valid_ranges.emplace_back(baseAddress, baseAddress + optionalHeader.SizeOfImage);
 
-
+            gdtr = GetRemoteGDTR(pi.hProcess);
             LOG(L"[+] Process created. Base address: 0x" << std::hex << baseAddress);
 
             HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
