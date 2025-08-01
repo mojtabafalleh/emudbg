@@ -66,12 +66,12 @@ EmuDbg.exe <exe_path> [-m target.dll] [-b software|hardware]
 
 ## 📌 Arguments
 
-| Argument               | Required | Description                                                                 |
-|------------------------|----------|-----------------------------------------------------------------------------|
-| `<exe_path>`           | ✅       | Path to the target executable you want to debug                            |
-| `-m <target.dll>`      | ❌       | Wait for a specific DLL to load before setting breakpoints                 |
-| `-b software|hardware` | ❌       | Choose the type of breakpoints to use: `software` (default) or `hardware`  |
-------------------------------------------------------------------------------------------------------------------
+| Argument               | Required | Description                                                                             |
+|------------------------|----------|-----------------------------------------------------------------------------------------|
+| `<exe_path>`           | ✅       | Path to the target executable you want to debug                                        |
+| `-m <target.dll>`      | ❌       | Wait for a specific DLL to load before setting breakpoints                             |
+| `-b software|hardware` | ❌       | Choose the type of breakpoints to use: `software` (default) or `hardware`              |
+-------------------------------------------------------------------------------------------------------------------------------
 
 ### 💡 Examples
 
