@@ -11,12 +11,13 @@
 #include <cstdint>
 #include "deps/zydis_wrapper.h"
 #include <tlhelp32.h>
+#include <xmmintrin.h>
 
 //------------------------------------------
 //LOG analyze 
 #define analyze_ENABLED 0
 //LOG everything
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 //test with real cpu
 #define DB_ENABLED 0
 //------------------------------------------
@@ -50,7 +51,7 @@ struct BreakpointInfo {
     BYTE originalByte;
     int remainingHits;
 };
-BreakpointType bpType = BreakpointType::Hardware;
+BreakpointType bpType = BreakpointType::Software;
 std::vector<std::pair<uint64_t, uint64_t>> valid_ranges;
 PROCESS_INFORMATION pi;
 IMAGE_OPTIONAL_HEADER64 optionalHeader;
@@ -467,7 +468,6 @@ bool SetHardwareBreakpointAuto(HANDLE hThread, uint64_t address) {
     if (!GetThreadContext(hThread, &ctx))
         return false;
 
-  
     int slot = -1;
     for (int i = 0; i < 4; ++i) {
         if ((ctx.Dr7 & (1 << (i * 2))) == 0) {
@@ -476,9 +476,12 @@ bool SetHardwareBreakpointAuto(HANDLE hThread, uint64_t address) {
         }
     }
 
-    if (slot == -1)
-        return false;  
+    if (slot == -1) {
+        std::cout << "No available hardware breakpoint slots. All 4 are in use." << std::endl;
+        return false;
+    }
 
+    // Set the address in the corresponding debug register
     switch (slot) {
     case 0: ctx.Dr0 = address; break;
     case 1: ctx.Dr1 = address; break;
@@ -486,10 +489,12 @@ bool SetHardwareBreakpointAuto(HANDLE hThread, uint64_t address) {
     case 3: ctx.Dr3 = address; break;
     }
 
+    // Enable the breakpoint locally
+    ctx.Dr7 |= (1 << (slot * 2));          // L0–L3 bits
 
-    ctx.Dr7 |= (1 << (slot * 2));         // local enable
-    ctx.Dr7 &= ~(3 << (16 + slot * 4));   // length = 1 byte (00)
-    ctx.Dr7 &= ~(3 << (18 + slot * 4));   // type = execute (00)
+    // Set length = 1 byte (00), and type = execute (00)
+    ctx.Dr7 &= ~(3 << (16 + slot * 4));    // Clear LEN bits
+    ctx.Dr7 &= ~(3 << (18 + slot * 4));    // Clear RW bits
 
     return SetThreadContext(hThread, &ctx);
 }
@@ -837,6 +842,13 @@ public:
             { ZYDIS_MNEMONIC_CVTTSS2SI, &CPU::emulate_cvttss2si },
             { ZYDIS_MNEMONIC_CVTSI2SS, &CPU::emulate_cvtsi2ss },
             { ZYDIS_MNEMONIC_TZCNT, &CPU::emulate_tzcnt },
+            { ZYDIS_MNEMONIC_RCPSS, &CPU::emulate_rcpss },
+            { ZYDIS_MNEMONIC_DIVSS, &CPU::emulate_divss },
+            { ZYDIS_MNEMONIC_CVTSS2SD, &CPU::emulate_cvtss2sd },
+            { ZYDIS_MNEMONIC_ANDPS, &CPU::emulate_andps },
+            { ZYDIS_MNEMONIC_CVTDQ2PS, &CPU::emulate_cvtdq2ps },
+            { ZYDIS_MNEMONIC_ADDSS, &CPU::emulate_addss },
+            { ZYDIS_MNEMONIC_CDQ, &CPU::emulate_cdq },
             
         };
 
@@ -1882,6 +1894,31 @@ private:
         }
         LOG(L"[+] vzeroupper executed: upper 128 bits of all ymm registers zeroed.");
     }
+    void emulate_addss(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];  // xmm register (destination)
+        const auto& src = instr->operands[1];  // xmm register or memory
+
+        __m128 dst_val, src_val;
+
+        if (!read_operand_value(dst, 128, dst_val) || !read_operand_value(src, 128, src_val)) {
+            LOG(L"[!] Failed to read operands for ADDSS");
+            return;
+        }
+
+        // Perform scalar float addition on the lowest 32 bits
+        float a = dst_val.m128_f32[0];
+        float b = src_val.m128_f32[0];
+        float result_scalar = a + b;
+
+        // Store result in the lowest 32 bits of destination, keep upper bits untouched
+        dst_val.m128_f32[0] = result_scalar;
+
+        write_operand_value(dst, 128, dst_val);
+
+        LOG(L"[+] ADDSS xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
+            << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0)
+            << L" => " << std::dec << result_scalar);
+    }
 
     void emulate_mul(const ZydisDisassembledInstruction* instr) {
         const auto& operands = instr->operands;
@@ -2037,6 +2074,38 @@ private:
         LOG(L"[+] SCASD executed: compared 0x" << std::hex << eax_val
             << L" with mem[0x" << addr << L"] = 0x" << mem_val
             << L", new RDI = 0x" << g_regs.rdi.q);
+    }
+    void emulate_rcpss(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+
+        __m128 dst_val, src_val;
+        if (!read_operand_value(dst, 128, dst_val) || !read_operand_value(src, 128, src_val)) {
+            LOG(L"[!] Failed to read operands for RCPS");
+            return;
+        }
+
+        // Load lowest 32 bits (scalar floats)
+        float a = dst_val.m128_f32[0];
+        float b = src_val.m128_f32[0];
+
+        if (b == 0.0f) {
+            LOG(L"[!] Division by zero in RCPS");
+            // behavior on division by zero can vary, here just skip or set some value
+            return;
+        }
+
+        // Approximate reciprocal
+        float result_scalar = 1.0f / b;
+
+        // Write back only the lowest float to dst, keep upper bits unchanged
+        dst_val.m128_f32[0] = result_scalar;
+
+        write_operand_value(dst, 128, dst_val);
+
+        LOG(L"[+] RCPS xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
+            << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0)
+            << L" => " << std::dec << result_scalar);
     }
 
 
@@ -2345,6 +2414,32 @@ private:
 
         LOG(L"[+] SETS => " << std::hex << static_cast<int>(value));
     }
+    void emulate_cvtdq2ps(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];  // xmm register
+        const auto& src = instr->operands[1];  // xmm register or mem
+
+        __m128i src_val_i32;
+        __m128 dst_val_f32;
+
+        if (!read_operand_value(src, 128, src_val_i32)) {
+            LOG(L"[!] Failed to read source operand for CVTDQ2PS");
+            return;
+        }
+
+        // Convert each int32 to float
+        for (int i = 0; i < 4; ++i) {
+            dst_val_f32.m128_f32[i] = static_cast<float>(src_val_i32.m128i_i32[i]);
+        }
+
+        write_operand_value(dst, 128, dst_val_f32);
+
+        LOG(L"[+] CVTDQ2PS xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
+            << ", src => ["
+            << dst_val_f32.m128_f32[0] << ", "
+            << dst_val_f32.m128_f32[1] << ", "
+            << dst_val_f32.m128_f32[2] << ", "
+            << dst_val_f32.m128_f32[3] << "]");
+    }
 
 
     void emulate_xor(const ZydisDisassembledInstruction* instr) {
@@ -2473,7 +2568,13 @@ private:
 
         LOG(L"[+] CDQE => Sign-extended EAX (0x" << std::hex << g_regs.rax.d << L") to RAX = 0x" << g_regs.rax.q);
     }
+    void emulate_cdq(const ZydisDisassembledInstruction* instr) {
+        int32_t eax = static_cast<int32_t>(g_regs.rax.d);
+        g_regs.rdx.q = (eax < 0) ? 0x00000000FFFFFFFF : 0x0000000000000000;
 
+        LOG(L"[+] CDQ => EAX = 0x" << std::hex << g_regs.rax.d
+            << L", EDX = 0x" << g_regs.rdx.q);
+    }
     void emulate_stosq(const ZydisDisassembledInstruction* instr) {
 
         WriteMemory(g_regs.rdi.q, &g_regs.rax.q, sizeof(uint64_t));
@@ -3514,6 +3615,29 @@ private:
         LOG(L"[+] XGETBV => ECX=0x" << std::hex << g_regs.rcx.q
             << L", RAX=0x" << g_regs.rax.q << L", RDX=0x" << g_regs.rdx.q);
     }
+    void emulate_andps(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];  // xmm register
+        const auto& src = instr->operands[1];  // xmm register or mem
+
+        __m128 dst_val, src_val;
+
+        if (!read_operand_value(dst, 128, dst_val) || !read_operand_value(src, 128, src_val)) {
+            LOG(L"[!] Failed to read operands for ANDPS");
+            return;
+        }
+
+        // Perform bitwise AND on the raw 128-bit values
+        __m128 result;
+        result.m128_i32[0] = dst_val.m128_i32[0] & src_val.m128_i32[0];
+        result.m128_i32[1] = dst_val.m128_i32[1] & src_val.m128_i32[1];
+        result.m128_i32[2] = dst_val.m128_i32[2] & src_val.m128_i32[2];
+        result.m128_i32[3] = dst_val.m128_i32[3] & src_val.m128_i32[3];
+
+        write_operand_value(dst, 128, result);
+
+        LOG(L"[+] ANDPS xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
+            << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0));
+    }
 
     void emulate_cmovnb(const ZydisDisassembledInstruction* instr) {
         const auto& dst = instr->operands[0];
@@ -3611,6 +3735,26 @@ private:
 
         LOG(L"[+] CMOVLE executed: moved 0x" << std::hex << value << L" to "
             << ZydisRegisterGetString(dst.reg.value));
+    }
+
+
+    void emulate_divss(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];
+        const auto& src = instr->operands[1];
+
+        __m128 dst_val, src_val;
+        if (!read_operand_value(dst, 128, dst_val) || !read_operand_value(src, 128, src_val)) {
+            LOG(L"[!] Failed to read operands for DIVSS");
+            return;
+        }
+
+        __m128 result = _mm_div_ss(dst_val, src_val);
+
+        write_operand_value(dst, 128, result);
+
+        LOG(L"[+] DIVSS xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
+            << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0)
+            << L" => " << std::dec << result.m128_f32[0]);
     }
 
     void emulate_rdtsc(const ZydisDisassembledInstruction*) {
@@ -3932,6 +4076,37 @@ private:
 
         LOG(L"[+] CVTSI2SS -> int: " << std::dec << src_val
             << L", float: " << result);
+    }
+    void emulate_cvtss2sd(const ZydisDisassembledInstruction* instr) {
+        const auto& dst = instr->operands[0];  // XMM register (dest)
+        const auto& src = instr->operands[1];  // XMM register or memory (src)
+
+        __m128 src_val_f32;
+        __m128d dst_val_f64;
+
+        // Read destination (needs to preserve upper 64 bits of XMM)
+        if (!read_operand_value(dst, 128, dst_val_f64)) {
+            LOG(L"[!] Failed to read destination XMM for CVTSS2SD");
+            return;
+        }
+
+        // Read source as 32-bit float from lower bits
+        if (!read_operand_value(src, 128, src_val_f32)) {
+            LOG(L"[!] Failed to read source operand for CVTSS2SD");
+            return;
+        }
+
+        float src_float = src_val_f32.m128_f32[0];
+        double converted = static_cast<double>(src_float);
+
+        // Write converted double into lower 64 bits, preserve upper bits
+        dst_val_f64.m128d_f64[0] = converted;
+
+        write_operand_value(dst, 128, dst_val_f64);
+
+        LOG(L"[+] CVTSS2SD xmm" << (dst.reg.value - ZYDIS_REGISTER_XMM0)
+            << ", xmm" << (src.reg.value - ZYDIS_REGISTER_XMM0)
+            << L" => " << std::fixed << converted);
     }
 
 
