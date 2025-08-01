@@ -29,3 +29,32 @@ Windows API functions are skipped through debugger stepping, allowing seamless e
    git clone https://github.com/yourusername/EmuDbg.git
    cd EmuDbg
    cmake . 
+
+## 🛠 Usage
+
+```bash
+EmuDbg.exe <exe_path> [-m target.dll] [-b software|hardware]
+
+### 📌 Arguments
+
+| Argument               | Required | Description                                                                 |
+|------------------------|----------|-----------------------------------------------------------------------------|
+| `<exe_path>`           | ✅       | Path to the target executable you want to debug                            |
+| `-m <target.dll>`      | ❌       | Wait for a specific DLL to load before setting breakpoints                 |
+| `-b software|hardware` | ❌       | Choose the type of breakpoints to use: `software` (default) or `hardware`  |
+
+
+### 💡 Examples
+
+#### 🔸 Run with software breakpoints on process entry point and TLS callbacks
+```bash
+EmuDbg.exe C:\Samples\MyApp.exe -b software
+
+#### 🔸 Wait for a specific DLL to load, then inject hardware breakpoints
+```bash
+EmuDbg.exe C:\Samples\MyApp.exe -m target.dll -b hardware
+
+### 🔸 Default usage with no flags (uses software breakpoints)
+
+```bash
+EmuDbg.exe C:\Malware\packed.exe
