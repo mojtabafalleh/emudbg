@@ -16,7 +16,7 @@
 //LOG analyze 
 #define analyze_ENABLED 0
 //LOG everything
-#define LOG_ENABLED 0
+#define LOG_ENABLED 1
 //test with real cpu
 #define DB_ENABLED 0
 //------------------------------------------
@@ -42,8 +42,15 @@ enum class ThreadState {
 extern "C" uint64_t __cdecl xgetbv_asm(uint32_t ecx);
 extern "C" uint64_t rdtsc_asm();
 
-
-
+enum class BreakpointType {
+    Software,
+    Hardware
+};
+struct BreakpointInfo {
+    BYTE originalByte;
+    int remainingHits;
+};
+BreakpointType bpType = BreakpointType::Hardware;
 std::vector<std::pair<uint64_t, uint64_t>> valid_ranges;
 PROCESS_INFORMATION pi;
 IMAGE_OPTIONAL_HEADER64 optionalHeader;
