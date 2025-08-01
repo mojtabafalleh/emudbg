@@ -76,18 +76,18 @@ int wmain(int argc, wchar_t* argv[]) {
                             uint32_t modEntryRVA = GetEntryPointRVA(buffer);
                             auto modTLSRVAs = GetTLSCallbackRVAs(buffer);
                             valid_ranges.emplace_back(moduleBase, moduleBase + optionalHeader.SizeOfImage);
-
+                            HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
 
                             if (modEntryRVA) {
                                 uint64_t addr = moduleBase + modEntryRVA;
-                                if (SetHardwareBreakpointAuto(pi.hThread, addr)) {
+                                if (SetHardwareBreakpointAuto(hThread, addr)) {
                                     LOG(L"[+] Breakpoint set at DLL EntryPoint: 0x" << std::hex << addr);
                                 }
                             }
 
                             for (auto rva : modTLSRVAs) {
                                 uint64_t addr = moduleBase + rva;
-                                if (SetHardwareBreakpointAuto(pi.hThread, addr)) {
+                                if (SetHardwareBreakpointAuto(hThread, addr)) {
                                     LOG(L"[+] Breakpoint set at DLL TLS Callback: 0x" << std::hex << addr);
                                 }
                             }
@@ -120,7 +120,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
                         CPU cpu(hThread);
 
-                        if (SetHardwareBreakpointAuto(pi.hProcess, address )) {
+                        if (SetHardwareBreakpointAuto(hThread, address )) {
                             LOG("addr : " << address );
                             cpu.CPUThreadState = ThreadState::Unknown;
                             cpuThreads.emplace(dbgEvent.dwThreadId, std::move(cpu));
@@ -145,9 +145,7 @@ int wmain(int argc, wchar_t* argv[]) {
             auto& procInfo = dbgEvent.u.CreateProcessInfo;
             baseAddress = reinterpret_cast<uint64_t>(procInfo.lpBaseOfImage);
             valid_ranges.emplace_back(baseAddress, baseAddress + optionalHeader.SizeOfImage);
-            for (const auto& range : valid_ranges) {
-                LOG(L"[dbg] Valid range: 0x" << std::hex << range.first << L" - 0x" << range.second);
-            }
+ 
             LOG(L"[+] Process created. Base address: 0x" << std::hex << baseAddress);
             HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
             if (hThread) {
@@ -155,22 +153,27 @@ int wmain(int argc, wchar_t* argv[]) {
             }
 
             if (!waitForModule) {
-        
-                if (entryRVA) {
-                    uint64_t addr = baseAddress + entryRVA;
-                    if (SetHardwareBreakpointAuto(pi.hThread, addr)) {
 
+                if (!tlsRVAs.empty()) {
+                    uint64_t tlsAddr = baseAddress + tlsRVAs.front();
+                    if (SetHardwareBreakpointAuto(hThread, tlsAddr)) {
+                        LOG(L"[+] Breakpoint set at first TLS callback: 0x" << std::hex << tlsAddr);
+                    }
+                    else {
+                        LOG(L"[-] Failed to set HWBP at TLS callback");
                     }
                 }
+                else if (entryRVA) {
 
-                for (auto rva : tlsRVAs) {
-                    uint64_t addr = baseAddress + rva;
-                    if (SetHardwareBreakpointAuto(pi.hThread, addr)) {
-         
+                    uint64_t addr = baseAddress + entryRVA;
+                    if (SetHardwareBreakpointAuto(hThread, addr)) {
+                        LOG(L"[+] Breakpoint set at EntryPoint: 0x" << std::hex << addr);
+                    }
+                    else {
+                        LOG(L"[-] Failed to set HWBP at EntryPoint");
                     }
                 }
             }
-
             break;
         }
         case EXCEPTION_DEBUG_EVENT: {
@@ -180,11 +183,12 @@ int wmain(int argc, wchar_t* argv[]) {
 
             switch (exceptionCode) {
             case EXCEPTION_SINGLE_STEP: {
-                RemoveHardwareBreakpointByAddress(pi.hProcess, exAddr);
+    
 
                 CONTEXT ctx = {};
                 ctx.ContextFlags = CONTEXT_FULL;
                 HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
+                RemoveHardwareBreakpointByAddress(hThread, exAddr);
                 if (hThread && GetThreadContext(hThread, &ctx)) {
                     SetThreadContext(hThread, &ctx);
                 }
@@ -200,7 +204,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
                     cpu.ApplyRegistersToContext(ctx);
 
-                    if (SetHardwareBreakpointAuto(pi.hProcess, addr)) {
+                    if (SetHardwareBreakpointAuto(hThread, addr)) {
                         LOG(L"[+] Breakpoint set at new address: 0x" << std::hex << addr);
                     }
                 }
