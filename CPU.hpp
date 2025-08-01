@@ -29,13 +29,6 @@
 #endif
 
 
-
-
-struct BreakpointInfo {
-    BYTE originalByte;
-    int remainingHits;  
-};
-
 enum class ThreadState {
     Unknown,
     Running,
@@ -50,7 +43,7 @@ extern "C" uint64_t __cdecl xgetbv_asm(uint32_t ecx);
 extern "C" uint64_t rdtsc_asm();
 
 
-bool breakpoint_hit;
+
 std::vector<std::pair<uint64_t, uint64_t>> valid_ranges;
 PROCESS_INFORMATION pi;
 IMAGE_OPTIONAL_HEADER64 optionalHeader;
@@ -460,6 +453,72 @@ inline void SetConsoleColor(ConsoleColor color) {
 #endif
 // ----------------------- Break point helper ------------------
 
+bool SetHardwareBreakpointAuto(HANDLE hThread, uint64_t address) {
+    CONTEXT ctx = {};
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+
+    if (!GetThreadContext(hThread, &ctx))
+        return false;
+
+  
+    int slot = -1;
+    for (int i = 0; i < 4; ++i) {
+        if ((ctx.Dr7 & (1 << (i * 2))) == 0) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot == -1)
+        return false;  
+
+    switch (slot) {
+    case 0: ctx.Dr0 = address; break;
+    case 1: ctx.Dr1 = address; break;
+    case 2: ctx.Dr2 = address; break;
+    case 3: ctx.Dr3 = address; break;
+    }
+
+
+    ctx.Dr7 |= (1 << (slot * 2));         // local enable
+    ctx.Dr7 &= ~(3 << (16 + slot * 4));   // length = 1 byte (00)
+    ctx.Dr7 &= ~(3 << (18 + slot * 4));   // type = execute (00)
+
+    return SetThreadContext(hThread, &ctx);
+}
+bool RemoveHardwareBreakpointByAddress(HANDLE hThread, uint64_t address) {
+    CONTEXT ctx = {};
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+
+    if (!GetThreadContext(hThread, &ctx))
+        return false;
+
+    for (int slot = 0; slot < 4; ++slot) {
+        uint64_t drVal = 0;
+        switch (slot) {
+        case 0: drVal = ctx.Dr0; break;
+        case 1: drVal = ctx.Dr1; break;
+        case 2: drVal = ctx.Dr2; break;
+        case 3: drVal = ctx.Dr3; break;
+        }
+
+        if (drVal == address) {
+
+            switch (slot) {
+            case 0: ctx.Dr0 = 0; break;
+            case 1: ctx.Dr1 = 0; break;
+            case 2: ctx.Dr2 = 0; break;
+            case 3: ctx.Dr3 = 0; break;
+            }
+            ctx.Dr7 &= ~(1 << (slot * 2)); // disable local enable bit
+            ctx.Dr7 &= ~(1 << (slot * 2 + 1)); 
+
+            return SetThreadContext(hThread, &ctx);
+        }
+    }
+
+    return false; 
+}
 
 
 
