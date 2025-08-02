@@ -69,6 +69,7 @@ int wmain(int argc, wchar_t* argv[]) {
                     std::wstring lowerTarget = targetModuleName;
                     std::transform(lowerTarget.begin(), lowerTarget.end(), lowerTarget.begin(), ::towlower);
 #if analyze_ENABLED
+                    LOG_analyze(GREEN,"DLL LOADED : "<< lowerLoaded.c_str());
                     if (lowerLoaded.find(L"ntdll.dll") != std::wstring::npos) {
                         ntdllBase = reinterpret_cast<uint64_t>(ld.lpBaseOfDll);
                         LOG(L"[+] ntdll.dll loaded at 0x" << std::hex << ntdllBase);
@@ -111,9 +112,14 @@ int wmain(int argc, wchar_t* argv[]) {
             CONTEXT ctx = { 0 };
             ctx.ContextFlags = CONTEXT_FULL;
             HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
+
             if (hThread && GetThreadContext(hThread, &ctx)) {
                 uint64_t pointer = ctx.Rdx, address = 0;
                 if (ReadProcessMemory(pi.hProcess, (LPCVOID)pointer, &address, sizeof(address), nullptr) && IsInEmulationRange(address)) {
+#if analyze_ENABLED
+                    LOG_analyze(GREEN, "New THREAD CREATED! Entry point : "<< address);
+
+#endif
                     CPU cpu(hThread);
                     cpu.CPUThreadState = ThreadState::Unknown;
                     cpuThreads.emplace(dbgEvent.dwThreadId, std::move(cpu));
