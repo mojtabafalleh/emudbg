@@ -81,17 +81,9 @@ int wmain(int argc, wchar_t* argv[]) {
                         auto modTLSRVAs = GetTLSCallbackRVAs(buffer);
                         valid_ranges.emplace_back(moduleBase, moduleBase + optionalHeader.SizeOfImage);
                         HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, dbgEvent.dwThreadId);
-                        if (modEntryRVA) {
-                            uint64_t addr = moduleBase + modEntryRVA;
-                            if (bpType == BreakpointType::Hardware)
-                                SetHardwareBreakpointAuto(hThread, addr);
-                            else {
-                                BYTE orig;
-                                if (SetBreakpoint(pi.hProcess, addr, orig)) breakpoints[addr] = { orig, 1 };
-                            }
-                        }
+                        if (modEntryRVA) tlsRVAs.push_back(modEntryRVA);
 
-                        for (auto rva : modTLSRVAs) {
+                        for (auto &rva : modTLSRVAs) {
                             uint64_t addr = moduleBase + rva;
                             if (bpType == BreakpointType::Hardware)
                                 SetHardwareBreakpointAuto(hThread, addr);
@@ -149,16 +141,9 @@ int wmain(int argc, wchar_t* argv[]) {
             }
 
             if (!waitForModule) {
-                if (entryRVA) {
-                    uint64_t addr = baseAddress + entryRVA;
-                    if (bpType == BreakpointType::Hardware)
-                        SetHardwareBreakpointAuto(hThread, addr);
-                    else {
-                        BYTE orig;
-                        if (SetBreakpoint(pi.hProcess, addr, orig)) breakpoints[addr] = { orig, 1 };
-                    }
-                }
-                for (auto rva : tlsRVAs) {
+                if (entryRVA) tlsRVAs.push_back(entryRVA);
+               
+                for (auto &rva : tlsRVAs) {
                     uint64_t addr = baseAddress + rva;
                     if (bpType == BreakpointType::Hardware)
                         SetHardwareBreakpointAuto(hThread, addr);
