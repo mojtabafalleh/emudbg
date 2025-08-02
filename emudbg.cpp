@@ -122,7 +122,9 @@ int wmain(int argc, wchar_t* argv[]) {
                         SetHardwareBreakpointAuto(hThread, address);
                     else {
                         BYTE orig;
-                        if (SetBreakpoint(pi.hProcess, address, orig)) breakpoints[address] = { orig, 1 };
+                        if (breakpoints.find(address) == breakpoints.end()) {
+                            if (SetBreakpoint(pi.hProcess, address, orig)) breakpoints[address] = { orig, 1 };
+                        }
                     }
                 }
             }
@@ -181,7 +183,7 @@ int wmain(int argc, wchar_t* argv[]) {
                         ctx.Rip -= 1;
                         SetThreadContext(hThread, &ctx);
                     }
-
+                    RemoveAllBreakpoints(pi.hProcess,breakpoints);
                     auto it = cpuThreads.find(dbgEvent.dwThreadId);
                     if (it != cpuThreads.end()) {
                         CPU& cpu = it->second;
@@ -192,6 +194,7 @@ int wmain(int argc, wchar_t* argv[]) {
                         LOG(L"[+] Emulation returned address: 0x" << std::hex << addr);
 
                         cpu.ApplyRegistersToContext(ctx);
+
 
                         bp.remainingHits--;
                         if (bp.remainingHits > 0) {

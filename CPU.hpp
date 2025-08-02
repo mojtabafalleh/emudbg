@@ -15,7 +15,7 @@
 
 //------------------------------------------
 //LOG analyze 
-#define analyze_ENABLED 1
+#define analyze_ENABLED 0
 //LOG everything
 #define LOG_ENABLED 0
 //test with real cpu
@@ -549,7 +549,18 @@ bool RemoveBreakpoint(HANDLE hProcess, uint64_t address, BYTE originalByte) {
     WriteProcessMemory(hProcess, (LPVOID)address, &originalByte, 1, nullptr);
     return true;
 }
+void RemoveAllBreakpoints(HANDLE hProcess, std::unordered_map<uint64_t, BreakpointInfo> breakpoints) {
+    for (auto& [address, info] : breakpoints) {
+        RemoveBreakpoint(hProcess, address, info.originalByte);
+    }
+}
 
+void RestoreAllBreakpoints(HANDLE hProcess, std::unordered_map<uint64_t, BreakpointInfo> breakpoints) {
+    for (auto& [address, info] : breakpoints) {
+        BYTE temp; 
+        SetBreakpoint(hProcess, address, temp);
+    }
+}
 
 // ----------------------------- Structs & Typedefs -----------------------------
 
