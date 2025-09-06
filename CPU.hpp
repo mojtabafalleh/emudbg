@@ -45,7 +45,7 @@ SETXSTATEFEATURESMASK pfnSetXStateFeaturesMask = NULL;
 //stealth 
 #define Stealth_Mode_ENABLED 1
 //emulate everything in dll user mode 
-#define FUll_user_MODE 0
+#define FUll_user_MODE 1
 //Multithread_the_MultiThread
 #define Multithread_the_MultiThread 0
 // Enable automatic patching of hardware checks
