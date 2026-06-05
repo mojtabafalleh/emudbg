@@ -1,4 +1,4 @@
-# EmuDbg
+# EmuDbg.
 
 **EmuDbg** is a lightweight, high-speed **Emulator + Debugger** designed for reverse engineering Windows executables.
 
